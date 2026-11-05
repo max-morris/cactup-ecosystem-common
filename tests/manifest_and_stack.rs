@@ -1,6 +1,6 @@
-use cactarium_format::manifest::Manifest;
-use cactarium_format::stack::FrozenStack;
-use cactarium_format::Error;
+use cactup_ecosystem_common::manifest::Manifest;
+use cactup_ecosystem_common::stack::FrozenStack;
+use cactup_ecosystem_common::Error;
 
 const PACKAGE: &str = r#"
 format = 1
@@ -206,7 +206,7 @@ fn head_is_never_a_base() {
 
 #[test]
 fn manifest_repo_file_names_fix_the_kind() {
-    use cactarium_format::manifest::{PACKAGE_FILE, STACK_FILE};
+    use cactup_ecosystem_common::manifest::{PACKAGE_FILE, STACK_FILE};
     // A manifest repo holding only the curated CarpetX stack.
     let stack = "format = 1\n[stack]\nname = \"carpetx\"\nowners = [\"cactarium\"]\nthornlist = \"carpetx.th\"\n";
     Manifest::from_repo_file(STACK_FILE, stack).unwrap();

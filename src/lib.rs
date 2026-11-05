@@ -1,4 +1,5 @@
-//! File formats shared by the Cactarium registry server and cactup.
+//! Code shared across the Cactup ecosystem: the `cactup` CLI on users' machines and the
+//! Cactarium registry.
 //!
 //! - [`sim`]: `.sim` files, which hold a parfile together with the thornlist it ran on, both kept
 //!   verbatim, plus per-repo pins.

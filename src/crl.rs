@@ -1,9 +1,9 @@
-//! The CRL 1.0 thornlist parser, shared by the Cactarium server and cactup.
+//! The CRL 1.0 thornlist parser, shared by cactup and the Cactarium registry.
 //!
 //! Copied from cactup's `src/thornlist.rs` (branch feature/cactarium, 2026-11-05, with the
 //! `!REPO_COMMIT` pin extension), minus the parts that read an installed tree
 //! (`parse_config_list` and its helpers stay in cactup). Parse semantics are a contract between
-//! the registry and cactup: change them only together, and treat a change as a `.sim`/API format
+//! cactup and the registry: change them only together, and treat a change as a `.sim`/API format
 //! question.
 //!
 //! Original notes: CRL 1.0 thornlist parser (spec §3.2) — a faithful port of the Perl

@@ -1,5 +1,5 @@
-use cactarium_format::Error;
-use cactarium_format::sim::{ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified};
+use cactup_ecosystem_common::Error;
+use cactup_ecosystem_common::sim::{ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified};
 
 const SHA: &str = "3f2c9e1a00112233445566778899aabbccddeeff";
 
