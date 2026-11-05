@@ -14,7 +14,7 @@
 //! Whatever the shape, every stack version is a **release**: a [`FrozenStack`] holding one
 //! verbatim CRL plus a pin for every repo. Releases are addressed exactly like package versions,
 //! with track-namespaced semver (`owner/stack@mixed-precision:1.2.0`). Consumers only ever see the
-//! frozen form. The one exception is `owner/stack@head` (see [`crate::slug::HEAD`]): the
+//! frozen form. The one exception is `owner/stack@master` (see [`crate::slug::TIP`]): the
 //! definition as written, unpinned repos at their branch tips, for developers and power users.
 
 use std::collections::BTreeSet;

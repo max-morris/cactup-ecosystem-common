@@ -13,10 +13,11 @@ use crate::name::{Name, Owner};
 use crate::version::{TrackedReq, TrackedVersion};
 use crate::{Error, Result};
 
-/// `owner/stack@head`: a stack's definition with every repo at its branch tip, unpinned. A power-user
+/// `owner/stack@master`: a stack's definition with every repo at its branch tip, unpinned, as
+/// `cactup install master` does for the ET manifest. A power-user
 /// form (like installing the ET's `master`): never a release and never a stack base. A `.sim` may
 /// name it as provenance, since its own `[[repo]]` pins are what make it reproducible.
-pub const HEAD: &str = "head";
+pub const TIP: &str = "master";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -36,17 +37,17 @@ fn valid_thorn(s: &str) -> bool {
 }
 
 impl Slug {
-    /// Whether this is `owner/stack@head`, the unpinned branch tips.
-    pub fn is_head(&self) -> bool {
-        self.at.as_deref() == Some(HEAD)
+    /// Whether this is `owner/stack@master`, the unpinned branch tips.
+    pub fn is_tip(&self) -> bool {
+        self.at.as_deref() == Some(TIP)
     }
 
     /// The `@` part as a version range (`^1.2`, `mixed-precision:^1`). No `@` means any version on
-    /// the default track. `@head` is not a range: check [`Slug::is_head`] first.
+    /// the default track. `@master` is not a range: check [`Slug::is_tip`] first.
     pub fn req(&self) -> Result<TrackedReq> {
         match &self.at {
             None => Ok(TrackedReq { track: None, req: semver::VersionReq::STAR }),
-            Some(at) if at == HEAD => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
+            Some(at) if at == TIP => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
             Some(at) => at.parse(),
         }
     }
@@ -146,9 +147,9 @@ mod tests {
         let exact: Slug = "max-morris/carpetx@mixed-precision:1.4.0".parse().unwrap();
         assert_eq!(exact.exact().unwrap().to_string(), "mixed-precision:1.4.0");
 
-        let head: Slug = "max-morris/carpetx@head".parse().unwrap();
-        assert!(head.is_head());
-        assert!(head.req().is_err() && head.exact().is_err());
+        let tip: Slug = "max-morris/carpetx@master".parse().unwrap();
+        assert!(tip.is_tip());
+        assert!(tip.req().is_err() && tip.exact().is_err());
 
         let bare: Slug = "einsteintoolkit/et".parse().unwrap();
         assert!(bare.req().unwrap().matches(&"2026.5.0".parse().unwrap()));
