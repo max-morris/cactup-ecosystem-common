@@ -208,6 +208,22 @@ pub fn parse_with_base(src: &str, include_base: Option<&Path>) -> Res<Thornlist>
 // Pinned foundation API (see the note on `parse` above): these accessors
 // have no caller yet outside the test module.
 impl Thornlist {
+    /// A list resolved from a plain Cactus `ThornList` (one `Arrangement/Thorn` per line) by a
+    /// caller that reads the installed tree to find each thorn's repo: cactup's
+    /// `parse_config_list`. `disabled_thorns` comes from `text`'s `#DISABLED` lines;
+    /// `crl_version` is empty and `is_plain()` is true.
+    pub fn from_plain(text: &str, root: String, components: Vec<Component>, untracked: Vec<String>) -> Thornlist {
+        Thornlist {
+            components,
+            disabled_thorns: collect_disabled(text),
+            warnings: Vec::new(),
+            crl_version: String::new(),
+            root,
+            untracked,
+            plain: true,
+        }
+    }
+
     pub fn components(&self) -> &[Component] {
         &self.components
     }
@@ -649,7 +665,7 @@ fn parse_commit(value: &str, target: &str, ty: ComponentType) -> Res<String> {
 
 /// Rule 14: lexical-only path canonicalization (collapse `//`, drop `/./`,
 /// resolve `a/../`). Never touches the filesystem.
-fn lexical_canonicalize(path: &str) -> String {
+pub fn lexical_canonicalize(path: &str) -> String {
     let absolute = path.starts_with('/');
     let mut stack: Vec<&str> = Vec::new();
     for seg in path.split('/') {
