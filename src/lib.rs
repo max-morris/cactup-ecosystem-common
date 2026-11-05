@@ -7,7 +7,7 @@
 //!   in a repo and read at each tag.
 //! - [`stack`]: stack definitions (flat thornlist, recipe, or both) and frozen releases.
 //! - [`ccl`]: dependency facts from a thorn's interface.ccl and configuration.ccl.
-//! - [`crl`]: the CRL 1.0 thornlist parser (shared with cactup).
+//! - [`crl`]: the CRL 1.0 thornlist parser (shared with cactup); [`crl_emit`] writes components back.
 //! - [`name`], [`version`], [`slug`]: owner/name identifiers, track-namespaced semver, and the
 //!   `owner/name[/Thorn][@...]` references users type.
 //!
@@ -17,6 +17,7 @@
 
 pub mod ccl;
 pub mod crl;
+pub mod crl_emit;
 pub mod error;
 pub mod manifest;
 pub mod name;
