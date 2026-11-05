@@ -13,11 +13,27 @@ use crate::name::{Name, Owner};
 use crate::version::{TrackedReq, TrackedVersion};
 use crate::{Error, Result};
 
-/// `owner/stack@master`: a stack's definition with every repo at its branch tip, unpinned, as
-/// `cactup install master` does for the ET manifest. A power-user
+/// The two unpinned forms of a stack, for developers and power users:
+/// - `owner/stack@head`: the definition as written, each repo at the tip of the branch it names
+///   (commits the definition pins on purpose stay pinned);
+/// - `owner/stack@master`: every repo at the tip of its default branch, ignoring the branches and
+///   pins the definition names, as `cactup install master` does for the ET manifest.
+///
+/// Neither is a release; neither can be a stack's base. A power-user
 /// form (like installing the ET's `master`): never a release and never a stack base. A `.sim` may
 /// name it as provenance, since its own `[[repo]]` pins are what make it reproducible.
-pub const TIP: &str = "master";
+pub const HEAD: &str = "head";
+/// See [`HEAD`].
+pub const MASTER: &str = "master";
+
+/// Which unpinned form a slug names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tip {
+    /// `@head`: the branches the definition names.
+    Head,
+    /// `@master`: every repo's default branch.
+    Master,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -37,17 +53,21 @@ fn valid_thorn(s: &str) -> bool {
 }
 
 impl Slug {
-    /// Whether this is `owner/stack@master`, the unpinned branch tips.
-    pub fn is_tip(&self) -> bool {
-        self.at.as_deref() == Some(TIP)
+    /// `@head` or `@master`: one of a stack's unpinned forms.
+    pub fn tip(&self) -> Option<Tip> {
+        match self.at.as_deref() {
+            Some(HEAD) => Some(Tip::Head),
+            Some(MASTER) => Some(Tip::Master),
+            _ => None,
+        }
     }
 
     /// The `@` part as a version range (`^1.2`, `mixed-precision:^1`). No `@` means any version on
-    /// the default track. `@master` is not a range: check [`Slug::is_tip`] first.
+    /// the default track. `@head` and `@master` are not ranges: check [`Slug::tip`] first.
     pub fn req(&self) -> Result<TrackedReq> {
         match &self.at {
             None => Ok(TrackedReq { track: None, req: semver::VersionReq::STAR }),
-            Some(at) if at == TIP => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
+            Some(at) if at == HEAD || at == MASTER => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
             Some(at) => at.parse(),
         }
     }
@@ -148,8 +168,11 @@ mod tests {
         assert_eq!(exact.exact().unwrap().to_string(), "mixed-precision:1.4.0");
 
         let tip: Slug = "max-morris/carpetx@master".parse().unwrap();
-        assert!(tip.is_tip());
+        assert_eq!(tip.tip(), Some(Tip::Master));
         assert!(tip.req().is_err() && tip.exact().is_err());
+        let head: Slug = "max-morris/carpetx@head".parse().unwrap();
+        assert_eq!(head.tip(), Some(Tip::Head));
+        assert!(head.req().is_err());
 
         let bare: Slug = "einsteintoolkit/et".parse().unwrap();
         assert!(bare.req().unwrap().matches(&"2026.5.0".parse().unwrap()));

@@ -18,8 +18,8 @@ use crate::{Error, Result};
 
 /// Track names: a lowercase letter followed by up to 63 of `[a-z0-9._-]`. They start with a letter
 /// so `pkg@mixed-precision` (a track) can never be confused with `pkg@1` (a range). `default` names
-/// the unprefixed track in `cactarium.toml`, `x` is a semver wildcard, and `master` means a
-/// stack's unpinned branch tips (see [`crate::slug::TIP`]), so none of them can be used.
+/// the unprefixed track in `cactarium.toml`, `x` is a semver wildcard, and `head` and `master`
+/// name a stack's unpinned forms (see [`crate::slug::Tip`]), so none of them can be used.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct TrackName(String);
@@ -44,7 +44,7 @@ impl TrackName {
         if let Some(c) = s.chars().find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(*c))) {
             return bad(&format!("'{c}' is not allowed"));
         }
-        if s == DEFAULT_TRACK_KEYWORD || s == "x" || s == crate::slug::TIP {
+        if s == DEFAULT_TRACK_KEYWORD || s == "x" || s == crate::slug::HEAD || s == crate::slug::MASTER {
             return bad("it is reserved");
         }
         Ok(())
@@ -271,6 +271,7 @@ mod tests {
         assert!("default".parse::<TrackName>().is_err());
         assert!("x".parse::<TrackName>().is_err());
         assert!("master".parse::<TrackName>().is_err());
+        assert!("head".parse::<TrackName>().is_err());
         assert!("1abc".parse::<TrackName>().is_err());
     }
 }

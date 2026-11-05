@@ -199,9 +199,11 @@ commit = "3f2c9e1a00112233445566778899aabbccddeeff"
 }
 
 #[test]
-fn master_is_never_a_base() {
-    let text = "format = 1\n[stack]\nname = \"x\"\nextends = [\"a/b@master\"]\n";
-    assert!(invalid(text).contains("exact release"));
+fn tips_are_never_a_base() {
+    for tip in ["head", "master"] {
+        let text = format!("format = 1\n[stack]\nname = \"x\"\nextends = [\"a/b@{tip}\"]\n");
+        assert!(invalid(&text).contains("exact release"));
+    }
 }
 
 #[test]

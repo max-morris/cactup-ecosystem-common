@@ -269,7 +269,7 @@ impl SimFile {
                 return Err(Error::invalid(format!("input '{}': '{h}' is not a sha256", i.knob)));
             }
         }
-        // `base` may be `owner/stack@master`: the [[repo]] pins, not the base, make a .sim reproducible.
+        // `base` may be `owner/stack@head` or `@master`: the [[repo]] pins, not the base, make a .sim reproducible.
         if let Some(p) = &self.provenance
             && p.flavor.is_some()
             && p.optionlist.is_some()
