@@ -299,7 +299,12 @@ fn is_url(s: &str) -> bool {
 /// Step 2: splice `!INCLUDE = <path>` lines in place, recursively. A line
 /// only counts as an include if there is no `#` before `!INCLUDE` on it
 /// (`^[^#]*!INCLUDE *= *(.*)$`), so a commented-out include is left alone.
-fn splice_includes(text: &str, base: Option<&Path>) -> Res<String> {
+///
+/// Public so a list can be made self-contained with exactly the parser's semantics (local paths
+/// resolved against `base`, URLs refused): a `.sim` carries its thornlist spliced and otherwise
+/// verbatim. Every line that is not an include is kept as written; the included files' line
+/// endings are normalized to `\n`.
+pub fn splice_includes(text: &str, base: Option<&Path>) -> Res<String> {
     let include_re = Regex::new(r"^[^#]*!INCLUDE *= *(.*)$").unwrap();
     let mut out_lines: Vec<String> = Vec::new();
     for line in text.split('\n') {
@@ -1471,6 +1476,18 @@ CarpetX/Arith
             Err(e) => panic!("expected include to resolve: {e:#}"),
         };
         assert_eq!(t.components().len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn splice_includes_is_public_and_keeps_other_lines() {
+        let dir = std::env::temp_dir().join(format!("crl-splice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("part.th"), "!TARGET = a\r\n!TYPE = git\r\n").unwrap();
+        let text = "!CRL_VERSION = 1.0\n# keep me\n!INCLUDE = part.th\n#!INCLUDE = gone.th\n";
+        let out = splice_includes(text, Some(&dir)).unwrap();
+        assert_eq!(out, "!CRL_VERSION = 1.0\n# keep me\n!TARGET = a\n!TYPE = git\n\n#!INCLUDE = gone.th\n");
+        assert!(splice_includes("!INCLUDE = https://x/y.th\n", Some(&dir)).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
