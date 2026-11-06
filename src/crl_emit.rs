@@ -5,7 +5,9 @@
 //! a flat stack or a `.sim` keeps its thornlist verbatim.
 //!
 //! Consecutive components whose directives are identical share one section; everything else gets
-//! its own section, with `$1`/`$2` already expanded. Parsing the output with [`crate::crl::parse`]
+//! its own section, with `$1`/`$2` already expanded. Checkouts always go one per line after
+//! `!CHECKOUT =`, never on that line: Cactus reads a CRL list as its ThornList too, and its reader
+//! skips every `!` line. Parsing the output with [`crate::crl::parse`]
 //! gives back the same components (the round-trip tests check this).
 
 use std::fmt::Write;
@@ -77,14 +79,11 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
         d(&mut out, "REPO_BRANCH", &first.branch);
         d(&mut out, "REPO_COMMIT", &first.commit);
         d(&mut out, "NAME", &first.name);
-        out.push_str("!CHECKOUT   =");
-        if j - i == 1 {
-            let _ = writeln!(out, " {}", first.checkout);
-        } else {
-            out.push('\n');
-            for c in &components[i..j] {
-                let _ = writeln!(out, "{}", c.checkout);
-            }
+        // One checkout per line, never on the !CHECKOUT line itself: Cactus also reads this file
+        // as its ThornList, skipping every `!` line and squeezing out spaces.
+        out.push_str("!CHECKOUT   =\n");
+        for c in &components[i..j] {
+            let _ = writeln!(out, "{}", c.checkout);
         }
         out.push('\n');
         i = j;
@@ -96,7 +95,7 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::crl::parse;
 
@@ -146,5 +145,25 @@ CarpetX/Arith
         // The CarpetX checkouts share one section; the $2 repos get one each.
         assert_eq!(text.matches("max-morris/CarpetX.git").count(), 1, "{text}");
         assert_eq!(text.matches("ExternalLibraries-").count(), 2, "{text}");
+        assert_no_thorn_on_bang_lines(&text);
+    }
+
+    /// No thorn (an `Arrangement/Thorn` checkout) may sit on a `!` line, where Cactus's ThornList
+    /// reader would skip it.
+    pub(crate) fn assert_no_thorn_on_bang_lines(text: &str) {
+        for line in text.lines().filter(|l| l.trim_start().starts_with('!')) {
+            if let Some(v) = line.split_once('=').map(|(k, v)| (k.trim(), v)).filter(|(k, _)| *k == "!CHECKOUT").map(|(_, v)| v) {
+                assert!(!v.split_whitespace().any(|t| t.contains('/')), "a thorn on a ! line: {line:?}\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_lone_thorn_gets_its_own_line() {
+        let a = parse("!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT = A/Only\n").unwrap();
+        let text = emit(a.root(), a.components(), &[], None);
+        assert!(text.contains("!CHECKOUT   =\nA/Only\n"), "{text}");
+        assert_no_thorn_on_bang_lines(&text);
+        assert_eq!(parse(&text).unwrap().components(), a.components());
     }
 }

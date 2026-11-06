@@ -865,7 +865,14 @@ fn pin_section(section: &str, checkouts: Option<(&Vec<String>, bool, bool)>, com
                 match checkouts {
                     None => done = *start,
                     Some((checkouts, first, last)) => {
-                        out.push_str(&format!("!CHECKOUT = {}\n", checkouts.join(" ")));
+                        // One checkout per line: Cactus reads a CRL list as its ThornList too, skipping
+                        // every `!` line and squeezing out spaces, so a thorn on the !CHECKOUT line
+                        // would never be built.
+                        out.push_str("!CHECKOUT =\n");
+                        for c in checkouts.iter() {
+                            out.push_str(c);
+                            out.push('\n');
+                        }
                         let lines: Vec<&str> = section[*start..value_end(i)].split_inclusive('\n').collect();
                         let is_token = |l: &&str| !l.trim().is_empty() && !l.trim_start().starts_with('#');
                         // The `!CHECKOUT` line itself is always a token line
@@ -1644,6 +1651,11 @@ Numerical/PrivateThorn
         assert!(out.starts_with("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n# the flesh\n"), "{out}");
         assert!(out.ends_with("# untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n"), "{out}");
         assert_eq!(out.matches("!URL = https://x/$2.git").count(), 2, "the $2 section is split per repo: {out}");
+        // The sections pinning wrote (the split $2 one) put each thorn on its own line; the
+        // untouched section stays exactly as its author wrote it.
+        let generated = &out[out.find("!URL = https://x/$2.git").unwrap()..out.find("# untouched").unwrap()];
+        crate::crl_emit::tests::assert_no_thorn_on_bang_lines(generated);
+        assert!(generated.contains("!CHECKOUT =\nET/Alpha\n"), "{out}");
 
         // No pins: nothing changes at all.
         assert_eq!(pin_text(text, &Default::default()).unwrap(), text);
