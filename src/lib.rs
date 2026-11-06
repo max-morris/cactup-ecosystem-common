@@ -6,6 +6,7 @@
 //! - [`manifest`]: `cactarium.toml` (a package) and `cactarium-stack.toml` (a stack), committed
 //!   in a repo and read at each tag.
 //! - [`stack`]: stack definitions (flat thornlist, recipe, or both) and frozen releases.
+//! - [`api`]: the Cactarium HTTP API's JSON shapes.
 //! - [`ccl`]: dependency facts from a thorn's interface.ccl and configuration.ccl.
 //! - [`crl`]: the CRL 1.0 thornlist parser (shared with cactup); [`crl_emit`] writes components back.
 //! - [`name`], [`version`], [`slug`]: owner/name identifiers, track-namespaced semver, and the
@@ -15,6 +16,7 @@
 //! error, and a generation newer than this crate knows is rejected with an upgrade message (the
 //! same discipline as cactup's MDB generations).
 
+pub mod api;
 pub mod ccl;
 pub mod crl;
 pub mod crl_emit;
