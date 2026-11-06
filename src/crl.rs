@@ -122,6 +122,12 @@ pub struct Component {
     /// repo is checked out detached at exactly this commit and never
     /// fast-forwarded.
     pub commit: Option<String>,
+    /// Written on the `!CHECKOUT` line itself rather than on a line of its own. Cactus also reads
+    /// a CRL list as its ThornList, and that reader skips every line starting with `!`, so such a
+    /// thorn is fetched but not built: the Einstein Toolkit's list uses this for checkout-only
+    /// thorns (e.g. `!CHECKOUT = CactusElliptic/EllPETSc` next to a `#DISABLED` line). Anything
+    /// that writes a list back out must keep each checkout where it was.
+    pub fetch_only: bool,
     /// Derived repo directory name (rule 12): `!NAME` if present, else the
     /// URL basename with a trailing `.git`, `.hg`, or `_darcs` stripped.
     /// GetComponents only actually computes this for git/darcs/hg
@@ -505,12 +511,22 @@ fn build_kv_map(full_section: &str) -> HashMap<String, String> {
         })
         .collect();
     let mut map = HashMap::new();
-    for (i, (key, _start, value_start)) in matches.iter().enumerate() {
+    for (i, (key, start, value_start)) in matches.iter().enumerate() {
         let value_end = matches.get(i + 1).map(|m| m.1).unwrap_or(full_section.len());
-        let value = full_section[*value_start..value_end].trim_end().to_owned();
+        let mut value = full_section[*value_start..value_end].trim_end().to_owned();
+        // The pattern's trailing `\s*` swallows a newline after `=`. For !CHECKOUT that newline
+        // matters (tokens on the directive's own line are fetched but not built), so keep it.
+        if key == "CHECKOUT" && full_section[*start..*value_start].split_once('=').is_some_and(|(_, ws)| ws.contains('\n')) {
+            value.insert(0, '\n');
+        }
         map.insert(key.clone(), value);
     }
     map
+}
+
+/// The checkout tokens written on the `!CHECKOUT` line itself.
+fn inline_checkouts(checkout_val: &str) -> Vec<&str> {
+    checkout_val.split('\n').next().unwrap_or("").split_whitespace().collect()
 }
 
 /// `$1`/`$2` from a checkout token (rule 11): `$1` is everything before the
@@ -581,6 +597,7 @@ fn build_section(
 
     if type_str.as_deref() == Some("ignore") {
         if let Some(checkout_val) = map.get("CHECKOUT") {
+            let inline = inline_checkouts(checkout_val);
             for token in checkout_val.split_whitespace() {
                 let (dir1, dir2) = split_checkout(token);
                 let name = map.get("NAME").map(|n| subst_12(n, &dir1, &dir2));
@@ -597,6 +614,7 @@ fn build_section(
                     repo_path: map.get("REPO_PATH").cloned(),
                     branch: map.get("REPO_BRANCH").cloned(),
                     commit: None,
+                    fetch_only: inline.contains(&token),
                     repo,
                 });
             }
@@ -625,6 +643,7 @@ fn build_section(
     let auth_url_orig = map.get("AUTH_URL").cloned();
     let commit = map.get("REPO_COMMIT").map(|c| parse_commit(c, &target, ty)).transpose()?;
 
+    let inline = inline_checkouts(checkout_val);
     for token in checkout_val.split_whitespace() {
         let (dir1, dir2) = split_checkout(token);
         let url = subst_12(&url_orig, &dir1, &dir2);
@@ -643,6 +662,7 @@ fn build_section(
             repo_path: map.get("REPO_PATH").cloned(),
             branch: map.get("REPO_BRANCH").cloned(),
             commit: commit.clone(),
+            fetch_only: inline.contains(&token),
             repo,
         });
     }
@@ -802,12 +822,13 @@ pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -
         let section = &text[start..end];
         let alone = parse(&format!("{header}{defines}\n{section}"))
             .with_context(|| format!("Failed to read the section at byte {start} on its own"))?;
-        // (repo, its checkouts) in order of first checkout.
-        let mut repos: Vec<(String, Vec<String>)> = Vec::new();
+        // (repo, its checkouts and whether each sat on the !CHECKOUT line) in order of first checkout.
+        let mut repos: Vec<(String, Vec<(String, bool)>)> = Vec::new();
         for c in alone.components() {
+            let entry = (c.checkout.clone(), c.fetch_only);
             match repos.iter_mut().find(|(r, _)| r == &c.repo) {
-                Some((_, checkouts)) => checkouts.push(c.checkout.clone()),
-                None => repos.push((c.repo.clone(), vec![c.checkout.clone()])),
+                Some((_, checkouts)) => checkouts.push(entry),
+                None => repos.push((c.repo.clone(), vec![entry])),
             }
         }
         if !repos.iter().any(|(r, _)| pins.contains_key(r)) {
@@ -825,7 +846,7 @@ pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -
     }
     // Same checkouts, and exactly the pins asked for.
     let pinned = parse(&out).context("The pinned thornlist does not parse")?;
-    let key = |c: &Component| (c.repo.clone(), c.target.clone(), c.checkout.clone());
+    let key = |c: &Component| (c.repo.clone(), c.target.clone(), c.checkout.clone(), c.fetch_only);
     let mut want: Vec<_> = original.components().iter().map(key).collect();
     let mut got: Vec<_> = pinned.components().iter().map(key).collect();
     want.sort();
@@ -848,7 +869,11 @@ pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -
 /// in the first copy and whatever follows the last checkout (blank lines and
 /// comments leading into the next section) after the last, so a split
 /// repeats nothing and moves nothing out of place.
-fn pin_section(section: &str, checkouts: Option<(&Vec<String>, bool, bool)>, commit: &str) -> String {
+/// A split section's checkouts (name, written on the !CHECKOUT line), and whether this copy is the
+/// first and the last of the split.
+type SplitCheckouts<'a> = Option<(&'a Vec<(String, bool)>, bool, bool)>;
+
+fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, commit: &str) -> String {
     let key_re = regex::Regex::new(r"(?m)^\s*!([^\s=]+)\s*=").expect("valid regex");
     let keys: Vec<(String, usize)> =
         key_re.captures_iter(section).map(|c| (c[1].to_owned(), c.get(0).expect("match").start())).collect();
@@ -870,11 +895,15 @@ fn pin_section(section: &str, checkouts: Option<(&Vec<String>, bool, bool)>, com
                 match checkouts {
                     None => done = *start,
                     Some((checkouts, first, last)) => {
-                        // One checkout per line: Cactus reads a CRL list as its ThornList too, skipping
-                        // every `!` line and squeezing out spaces, so a thorn on the !CHECKOUT line
-                        // would never be built.
-                        out.push_str("!CHECKOUT =\n");
-                        for c in checkouts.iter() {
+                        // Each checkout stays where it was: on the !CHECKOUT line (fetched, not built,
+                        // since Cactus's ThornList reader skips `!` lines) or on a line of its own.
+                        let inline: Vec<&str> = checkouts.iter().filter(|c| c.1).map(|c| c.0.as_str()).collect();
+                        if inline.is_empty() {
+                            out.push_str("!CHECKOUT =\n");
+                        } else {
+                            out.push_str(&format!("!CHECKOUT = {}\n", inline.join(" ")));
+                        }
+                        for (c, _) in checkouts.iter().filter(|c| !c.1) {
                             out.push_str(c);
                             out.push('\n');
                         }
@@ -1668,11 +1697,17 @@ Numerical/PrivateThorn
         assert!(out.starts_with("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n# the flesh\n"), "{out}");
         assert!(out.ends_with("# untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n"), "{out}");
         assert_eq!(out.matches("!URL = https://x/$2.git").count(), 2, "the $2 section is split per repo: {out}");
-        // The sections pinning wrote (the split $2 one) put each thorn on its own line; the
-        // untouched section stays exactly as its author wrote it.
+        // The split $2 section keeps its thorns on their own lines (built), as the author wrote them.
         let generated = &out[out.find("!URL = https://x/$2.git").unwrap()..out.find("# untouched").unwrap()];
-        crate::crl_emit::tests::assert_no_thorn_on_bang_lines(generated);
+        assert!(crate::crl_emit::tests::thorns_on_bang_lines(generated).is_empty(), "{out}");
         assert!(generated.contains("!CHECKOUT =\nET/Alpha\n"), "{out}");
+        // A checkout-only thorn (on the !CHECKOUT line) stays fetch-only when its section is split.
+        let et = "!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
+                  !CHECKOUT = E/PETSc\nE/Base\n";
+        let pins: std::collections::BTreeMap<String, String> = [("PETSc".to_string(), a.clone())].into_iter().collect();
+        let split = pin_text(et, &pins).unwrap();
+        let fetch_only: Vec<(String, bool)> = parse(&split).unwrap().components().iter().map(|c| (c.checkout.clone(), c.fetch_only)).collect();
+        assert_eq!(fetch_only, [("E/PETSc".to_string(), true), ("E/Base".to_string(), false)], "{split}");
 
         // No pins: nothing changes at all.
         assert_eq!(pin_text(text, &Default::default()).unwrap(), text);

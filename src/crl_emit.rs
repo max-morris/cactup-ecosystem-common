@@ -5,9 +5,9 @@
 //! a flat stack or a `.sim` keeps its thornlist verbatim.
 //!
 //! Consecutive components whose directives are identical share one section; everything else gets
-//! its own section, with `$1`/`$2` already expanded. Checkouts always go one per line after
-//! `!CHECKOUT =`, never on that line: Cactus reads a CRL list as its ThornList too, and its reader
-//! skips every `!` line. Parsing the output with [`crate::crl::parse`]
+//! its own section, with `$1`/`$2` already expanded. Each checkout goes back where the parser found
+//! it ([`Component::fetch_only`]): on the `!CHECKOUT` line itself (fetched but not built, since
+//! Cactus's ThornList reader skips `!` lines) or on a line of its own (built). Parsing the output with [`crate::crl::parse`]
 //! gives back the same components (the round-trip tests check this).
 
 use std::fmt::Write;
@@ -79,10 +79,14 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
         d(&mut out, "REPO_BRANCH", &first.branch);
         d(&mut out, "REPO_COMMIT", &first.commit);
         d(&mut out, "NAME", &first.name);
-        // One checkout per line, never on the !CHECKOUT line itself: Cactus also reads this file
-        // as its ThornList, skipping every `!` line and squeezing out spaces.
-        out.push_str("!CHECKOUT   =\n");
-        for c in &components[i..j] {
+        let group = &components[i..j];
+        let inline: Vec<&str> = group.iter().filter(|c| c.fetch_only).map(|c| c.checkout.as_str()).collect();
+        if inline.is_empty() {
+            out.push_str("!CHECKOUT   =\n");
+        } else {
+            let _ = writeln!(out, "!CHECKOUT   = {}", inline.join(" "));
+        }
+        for c in group.iter().filter(|c| !c.fetch_only) {
             let _ = writeln!(out, "{}", c.checkout);
         }
         out.push('\n');
@@ -145,25 +149,53 @@ CarpetX/Arith
         // The CarpetX checkouts share one section; the $2 repos get one each.
         assert_eq!(text.matches("max-morris/CarpetX.git").count(), 1, "{text}");
         assert_eq!(text.matches("ExternalLibraries-").count(), 2, "{text}");
-        assert_no_thorn_on_bang_lines(&text);
     }
 
-    /// No thorn (an `Arrangement/Thorn` checkout) may sit on a `!` line, where Cactus's ThornList
-    /// reader would skip it.
-    pub(crate) fn assert_no_thorn_on_bang_lines(text: &str) {
-        for line in text.lines().filter(|l| l.trim_start().starts_with('!')) {
-            if let Some(v) = line.split_once('=').map(|(k, v)| (k.trim(), v)).filter(|(k, _)| *k == "!CHECKOUT").map(|(_, v)| v) {
-                assert!(!v.split_whitespace().any(|t| t.contains('/')), "a thorn on a ! line: {line:?}\n{text}");
-            }
-        }
+    /// Every thorn written on a `!` line, i.e. fetched but not built.
+    pub(crate) fn thorns_on_bang_lines(text: &str) -> Vec<String> {
+        text.lines()
+            .filter_map(|l| l.trim_start().strip_prefix("!CHECKOUT")?.trim_start().strip_prefix('=').map(str::to_owned))
+            .flat_map(|v| v.split_whitespace().filter(|t| t.contains('/')).map(str::to_owned).collect::<Vec<_>>())
+            .collect()
     }
 
+    /// Max's real ET-with-forks list survives emit and pin_text with every checkout in place.
     #[test]
-    fn a_lone_thorn_gets_its_own_line() {
-        let a = parse("!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT = A/Only\n").unwrap();
-        let text = emit(a.root(), a.components(), &[], None);
-        assert!(text.contains("!CHECKOUT   =\nA/Only\n"), "{text}");
-        assert_no_thorn_on_bang_lines(&text);
+    fn the_real_et_list_round_trips() {
+        let Some(home) = std::env::var_os("HOME") else { return };
+        let Ok(src) = std::fs::read_to_string(std::path::Path::new(&home).join("Cactus-2026/thornlists/carpetx-mp-forks.th")) else {
+            return;
+        };
+        let a = parse(&src).unwrap();
+        assert!(a.components().iter().any(|c| c.fetch_only && c.checkout == "CactusElliptic/EllPETSc"));
+        let text = emit(a.root(), a.components(), a.disabled_thorns(), None);
         assert_eq!(parse(&text).unwrap().components(), a.components());
+        let pins: std::collections::BTreeMap<String, String> =
+            a.components().iter().filter(|c| c.ty == crate::crl::ComponentType::Git).map(|c| (c.repo.clone(), "a".repeat(40))).collect();
+        let pinned = parse(&crate::crl::pin_text(&src, &pins).unwrap()).unwrap();
+        let key = |c: &crate::crl::Component| (c.repo.clone(), c.checkout.clone(), c.fetch_only);
+        let mut want: Vec<_> = a.components().iter().map(key).collect();
+        let mut got: Vec<_> = pinned.components().iter().map(key).collect();
+        want.sort();
+        got.sort();
+        assert_eq!(want, got);
+    }
+
+    /// The Einstein Toolkit's checkout-only idiom: a thorn on the !CHECKOUT line is fetched but not
+    /// built, and must stay there; a thorn on its own line must stay there too.
+    #[test]
+    fn checkouts_keep_their_placement() {
+        let src = "!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/ce.git\n!REPO_PATH = $2\n\
+                   !CHECKOUT = CactusElliptic/EllPETSc CactusElliptic/TATPETSc\nCactusElliptic/EllBase\n#DISABLED CactusElliptic/EllPETSc\n";
+        let a = parse(src).unwrap();
+        let only: Vec<(&str, bool)> = a.components().iter().map(|c| (c.checkout.as_str(), c.fetch_only)).collect();
+        assert_eq!(only, [("CactusElliptic/EllPETSc", true), ("CactusElliptic/TATPETSc", true), ("CactusElliptic/EllBase", false)]);
+        let text = emit(a.root(), a.components(), a.disabled_thorns(), None);
+        assert!(text.contains("!CHECKOUT   = CactusElliptic/EllPETSc CactusElliptic/TATPETSc\nCactusElliptic/EllBase\n"), "{text}");
+        assert_eq!(parse(&text).unwrap().components(), a.components());
+        // A directive written alone on its line with its checkouts below has none inline.
+        let b = parse("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT =\nA/Built\n").unwrap();
+        assert!(!b.components()[0].fetch_only);
+        assert!(thorns_on_bang_lines(&emit(b.root(), b.components(), &[], None)).is_empty());
     }
 }
