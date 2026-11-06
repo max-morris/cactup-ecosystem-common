@@ -173,7 +173,16 @@ pub struct ScannedThorn {
     pub facts: ThornFacts,
 }
 
+/// CCL files larger than this are not read (real ones are a few kB).
+pub const MAX_CCL_BYTES: u64 = 1024 * 1024;
+
+/// Reads a CCL file only if it is a regular file (never through a symlink, which could point
+/// outside the tree or at a device) and not absurdly large. The tree may be untrusted.
 fn read(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > MAX_CCL_BYTES {
+        return None;
+    }
     std::fs::read_to_string(path).ok()
 }
 
@@ -199,7 +208,9 @@ fn scan_dir(root: &Path, rel: &Path, out: &mut Vec<ScannedThorn>) {
 
 /// Finds thorns (directories with an `interface.ccl`) at the root, one level down
 /// (`Thorn/`, when the root is an arrangement), and two levels down (`Arrangement/Thorn/`).
-/// Hidden directories and symlinks are skipped. Sorted by directory.
+/// Hidden directories, symlinks (to directories or to CCL files) and CCL files over
+/// [`MAX_CCL_BYTES`] are skipped, so an untrusted tree cannot make this read outside itself.
+/// Sorted by directory.
 pub fn scan_tree(root: &Path) -> Vec<ScannedThorn> {
     fn subdirs(dir: &Path) -> Vec<PathBuf> {
         let Ok(rd) = std::fs::read_dir(dir) else { return Vec::new() };
@@ -301,6 +312,22 @@ PROVIDES CarpetX
         // Rooted at the arrangement, the same thorns have no arrangement.
         let found = scan_tree(&root.join("CarpetX"));
         assert!(found.iter().all(|t| t.arrangement.is_none() && t.name.is_some()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_ccl_files_are_never_followed() {
+        let root = std::env::temp_dir().join(format!("cactarium-ccl-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Arr/Evil")).unwrap();
+        std::fs::create_dir_all(root.join("Arr/Big")).unwrap();
+        let secret = root.join("secret.txt");
+        std::fs::write(&secret, "IMPLEMENTS: s3cret\n").unwrap();
+        std::os::unix::fs::symlink(&secret, root.join("Arr/Evil/interface.ccl")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", root.join("Arr/Evil/configuration.ccl")).unwrap();
+        std::fs::write(root.join("Arr/Big/interface.ccl"), "#".repeat(MAX_CCL_BYTES as usize + 1)).unwrap();
+        assert!(scan_tree(&root).is_empty(), "{:?}", scan_tree(&root));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
