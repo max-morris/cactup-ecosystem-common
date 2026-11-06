@@ -9,6 +9,8 @@
 //! - [`api`]: the Cactarium HTTP API's JSON shapes.
 //! - [`ccl`]: dependency facts from a thorn's interface.ccl and configuration.ccl.
 //! - [`crl`]: the CRL 1.0 thornlist parser (shared with cactup); [`crl_emit`] writes components back.
+//! - [`par`]: which parts of a parfile are comments, and which `@NAME@` / `@KNOB(...)@` /
+//!   `@ENV(...)@` tokens it uses, lexed exactly as cactup substitutes them.
 //! - [`name`], [`version`], [`slug`]: owner/name identifiers, track-namespaced semver, and the
 //!   `owner/name[/Thorn][@...]` references users type.
 //!
@@ -23,6 +25,7 @@ pub mod crl_emit;
 pub mod error;
 pub mod manifest;
 pub mod name;
+pub mod par;
 pub mod sim;
 pub mod slug;
 pub mod stack;
