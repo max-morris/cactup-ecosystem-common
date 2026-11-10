@@ -77,14 +77,8 @@ pub struct PackageSection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement: Option<String>,
     /// The thorns to publish, by directory name. Default: every directory with an interface.ccl.
-    /// A repo that is itself one thorn names it here (and gives `arrangement` and `repo-path`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thorns: Option<Vec<String>>,
-    /// How a thornlist reaches this repo's thorns, written as its `!REPO_PATH` (e.g. `../$1-$2`,
-    /// the Einstein Toolkit's convention for a repo that is one thorn). Default: each thorn's
-    /// directory in the repo. Required for a repo whose root is the thorn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repo_path: Option<String>,
     /// The track shown first on the package page: a track name, or "default" for unprefixed tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_track: Option<String>,
@@ -203,17 +197,6 @@ impl Manifest {
                 }
                 if let Some(t) = &p.tag_pattern {
                     crate::version::TagPattern::from_str(t)?;
-                }
-                if let Some(r) = &p.repo_path {
-                    let bad = r.is_empty()
-                        || r.starts_with('/')
-                        || r.contains('\\')
-                        || r.chars().any(|c| c.is_whitespace() || c.is_control());
-                    if bad {
-                        return Err(Error::invalid(format!(
-                            "repo-path '{r}' must be a relative path as a thornlist's !REPO_PATH writes it"
-                        )));
-                    }
                 }
             }
             (None, Some(s)) => s.validate()?,
