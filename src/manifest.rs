@@ -65,6 +65,10 @@ pub struct PackageSection {
     pub license: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub homepage: Option<String>,
+    /// Where to go for help or to report problems: an `https://` URL (an issue tracker, a forum) or
+    /// a `mailto:` address. Unset means the repo the artifact comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
     /// Path of the README to show, relative to the repo root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme: Option<String>,
@@ -118,6 +122,13 @@ pub struct Caveat {
     pub note: String,
 }
 
+/// A `contact` must be an https URL or a mailto: address.
+pub fn validate_contact(c: &str) -> Result<()> {
+    let ok = (c.starts_with("https://") && c.len() > "https://".len() || c.starts_with("mailto:") && c.contains('@'))
+        && !c.chars().any(|ch| ch.is_whitespace() || ch.is_control());
+    if ok { Ok(()) } else { Err(Error::invalid(format!("contact '{c}' must be an https:// URL or a mailto: address"))) }
+}
+
 fn bare_target(t: &Slug) -> Result<()> {
     if t.thorn.is_some() || t.at.is_some() {
         return Err(Error::invalid(format!("claim target '{t}' must be just owner/name (put versions in 'range')")));
@@ -167,6 +178,9 @@ impl Manifest {
             (Some(p), None) => {
                 if p.owners.is_empty() {
                     return Err(Error::invalid("[package] owners is empty"));
+                }
+                if let Some(c) = &p.contact {
+                    validate_contact(c)?;
                 }
                 if let Some(d) = &p.default_track
                     && d != DEFAULT_TRACK_KEYWORD

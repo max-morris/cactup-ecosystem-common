@@ -83,6 +83,9 @@ pub struct Resolved {
     pub kind: String,
     /// The repo to fetch from (packages and repo-backed stacks).
     pub url: Option<String>,
+    /// Where to go for help or to report problems with this version: its declared contact, else
+    /// the repo.
+    pub contact: Option<String>,
     #[serde(flatten)]
     pub version: VersionInfo,
 }
@@ -96,6 +99,10 @@ pub struct EntryInfo {
     pub verified: bool,
     pub curated: bool,
     pub repo: Option<String>,
+    /// Where to go for help or to report problems: the declared contact, else the repo.
+    pub contact: Option<String>,
+    /// How many users saved it.
+    pub hearts: i64,
     /// Track names, the default track as "".
     pub tracks: Vec<String>,
     pub versions: Vec<String>,
@@ -187,6 +194,7 @@ mod tests {
             slug: "max/carpetx@mixed-precision:1.4.0".into(),
             kind: "package".into(),
             url: Some("https://github.com/max-morris/CarpetX.git".into()),
+            contact: Some("https://github.com/max-morris/CarpetX/issues".into()),
             version: VersionInfo {
                 version: "mixed-precision:1.4.0".into(),
                 track: Some("mixed-precision".into()),

@@ -12,6 +12,7 @@ fn sample(thornlist: &str, par: &str) -> SimFile {
             description: None,
             authors: vec!["Max Morris".into()],
             license: None,
+            contact: None,
             cactarium: None,
             root: "Cactus".into(),
         },

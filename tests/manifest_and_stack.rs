@@ -138,6 +138,19 @@ fn stack_validation() {
 }
 
 #[test]
+fn contact_must_be_a_url_or_mailto() {
+    use cactup_ecosystem_common::manifest::validate_contact;
+    validate_contact("https://trac.einsteintoolkit.org/").unwrap();
+    validate_contact("mailto:users@einsteintoolkit.org").unwrap();
+    for bad in ["http://x.org", "https://", "mailto:nobody", "javascript:alert(1)", "https://a b", "issues"] {
+        assert!(validate_contact(bad).is_err(), "{bad}");
+    }
+    let m = PACKAGE.replace("license = \"LGPL-2.1-or-later\"", "license = \"LGPL-2.1-or-later\"\ncontact = \"https://trac.einsteintoolkit.org/\"");
+    assert_eq!(Manifest::from_toml(&m).unwrap().package.unwrap().contact.as_deref(), Some("https://trac.einsteintoolkit.org/"));
+    assert!(Manifest::from_toml(&PACKAGE.replace("license = \"LGPL-2.1-or-later\"", "contact = \"javascript:x\"")).is_err());
+}
+
+#[test]
 fn manifest_validation() {
     let neither = "format = 1\n";
     assert!(invalid(neither).contains("[package] or a [stack]"));

@@ -36,6 +36,10 @@ pub struct StackSection {
     pub owners: Vec<Owner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Where to go for help or to report problems: an `https://` URL (an issue tracker, a forum) or
+    /// a `mailto:` address. Unset means the repo the artifact comes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
     /// Bases, highest priority first: where two bases disagree on a repo's source, the earlier one
     /// wins. Each is an exact release, `owner/stack@1.2.0` or `owner/stack@track:1.2.0`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -90,6 +94,9 @@ impl StackSection {
 
     pub fn validate(&self) -> Result<()> {
         let n = &self.name;
+        if let Some(c) = &self.contact {
+            crate::manifest::validate_contact(c)?;
+        }
         if self.extends.is_empty() && self.thornlist.is_none() {
             return Err(Error::invalid(format!("stack '{n}' needs a thornlist, extends, or both")));
         }

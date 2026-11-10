@@ -44,6 +44,9 @@ pub struct SimMeta {
     /// An SPDX license expression.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
+    /// Where to go for help with this simulation: an `https://` URL or a `mailto:` address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
     /// Set by the registry when the file is published: `owner/name@N`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cactarium: Option<Slug>,
@@ -244,6 +247,9 @@ impl SimFile {
         }
         if self.sim.name.trim().is_empty() {
             return Err(Error::invalid("[sim] name is empty"));
+        }
+        if let Some(c) = &self.sim.contact {
+            crate::manifest::validate_contact(c)?;
         }
         plain_filename("thornlist filename", &self.thornlist.filename)?;
         plain_filename("parfile filename", &self.parfile.filename)?;
