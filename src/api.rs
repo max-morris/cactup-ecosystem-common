@@ -186,7 +186,12 @@ pub struct Published {
 #[serde(rename_all = "kebab-case")]
 pub struct Refreshed {
     pub slug: String,
+    /// Tags found and stored by this refresh, whether published at once or awaiting review.
     pub new_versions: usize,
+    /// The entry's versions waiting for an admin's review (this refresh's and any earlier ones);
+    /// not served until approved. Absent from older servers, so it defaults to 0.
+    #[serde(default)]
+    pub awaiting_review: usize,
 }
 
 #[cfg(test)]
