@@ -59,6 +59,13 @@ pub struct StackSection {
     /// Thorns to disable (`#DISABLED`), as `Arrangement/Thorn`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disable: Vec<String>,
+    /// How release tags become versions when they aren't `vX.Y.Z`, e.g.
+    /// `ET_{major}_{minor}_v{patch}` (see [`crate::version::TagPattern`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_pattern: Option<String>,
+    /// Release tags below this version aren't releases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<semver::Version>,
     /// Pin every git repo that has a tag of this name to that tag's commit (e.g. `ET_2026_05_v0`).
     /// A repo without the tag falls through to its base release's pin or its branch. A repo's own
     /// `[[stack.pin]]` and a `!REPO_COMMIT` in the thornlist both win over this.
@@ -180,6 +187,9 @@ impl StackSection {
         }
         if let Some(t) = &self.pin_tag {
             validate_tag(t)?;
+        }
+        if let Some(t) = &self.tag_pattern {
+            t.parse::<crate::version::TagPattern>()?;
         }
         let mut pinned = BTreeSet::new();
         for p in &self.pins {

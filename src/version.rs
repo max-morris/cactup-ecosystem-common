@@ -116,6 +116,65 @@ impl TrackedVersion {
     }
 }
 
+/// How release tags that aren't `vX.Y.Z` become versions: literal text around `{major}`,
+/// `{minor}` and `{patch}`, each exactly once. `ET_{major}_{minor}_v{patch}` reads the Einstein
+/// Toolkit's `ET_2026_05_v0` as 2026.5.0 (on the default track). A manifest gives it as
+/// `tag-pattern`; with one, only tags it matches are versions.
+#[derive(Clone, Debug)]
+pub struct TagPattern {
+    text: String,
+    re: regex::Regex,
+}
+
+impl TagPattern {
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    /// The version `tag` names, if it matches.
+    pub fn version(&self, tag: &str) -> Option<TrackedVersion> {
+        let tag = tag.strip_prefix("refs/tags/").unwrap_or(tag);
+        let c = self.re.captures(tag)?;
+        let n = |k: &str| c[k].parse::<u64>().ok();
+        Some(TrackedVersion { track: None, version: semver::Version::new(n("major")?, n("minor")?, n("patch")?) })
+    }
+}
+
+impl FromStr for TagPattern {
+    type Err = Error;
+
+    fn from_str(pattern: &str) -> Result<Self> {
+        let bad = |why: &str| Error::invalid(format!("tag-pattern '{pattern}': {why}"));
+        if pattern.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(bad("no spaces"));
+        }
+        let mut re = String::from("^");
+        let mut rest = pattern;
+        let mut seen: Vec<&str> = Vec::new();
+        while let Some(open) = rest.find('{') {
+            re.push_str(&regex::escape(&rest[..open]));
+            let close = rest[open..].find('}').map(|c| open + c).ok_or_else(|| bad("an unclosed {"))?;
+            let name = &rest[open + 1..close];
+            if !matches!(name, "major" | "minor" | "patch") || seen.contains(&name) {
+                return Err(bad("only {major}, {minor} and {patch}, each once"));
+            }
+            seen.push(name);
+            re.push_str(&format!("(?P<{name}>[0-9]{{1,9}})"));
+            rest = &rest[close + 1..];
+        }
+        if rest.contains('}') {
+            return Err(bad("a } without its {"));
+        }
+        re.push_str(&regex::escape(rest));
+        re.push('$');
+        if seen.len() != 3 {
+            return Err(bad("needs {major}, {minor} and {patch}"));
+        }
+        let re = regex::Regex::new(&re).map_err(|e| bad(&e.to_string()))?;
+        Ok(TagPattern { text: pattern.to_owned(), re })
+    }
+}
+
 /// Splits `track:rest`. A leading lowercase letter means a track; anything else is plain semver.
 fn split_track(s: &str) -> Result<(Option<TrackName>, &str)> {
     match s.split_once(':') {

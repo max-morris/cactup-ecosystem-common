@@ -296,3 +296,46 @@ fn manifest_repo_file_names_fix_the_kind() {
     assert!(err.to_string().contains("needs owners"));
     assert!(Manifest::from_repo_file("stack.toml", stack).is_err());
 }
+
+/// `tag-pattern` and `since`: release tags that aren't vX.Y.Z, in a package or a stack.
+#[test]
+fn tag_pattern_and_since() {
+    use cactup_ecosystem_common::version::TagPattern;
+    let p: TagPattern = "ET_{major}_{minor}_v{patch}".parse().unwrap();
+    assert_eq!(p.version("ET_2026_05_v0").unwrap().version, semver::Version::new(2026, 5, 0));
+    assert_eq!(p.version("refs/tags/ET_2025_11_v2").unwrap().version, semver::Version::new(2025, 11, 2));
+    assert!(p.version("ET_2026_05").is_none() && p.version("v1.2.3").is_none() && p.version("xET_2026_05_v0").is_none());
+    for bad in ["ET_{major}_{minor}", "ET_{major}_{major}_v{patch}", "{major}.{minor}.{build}", "a b{major}{minor}{patch}", "{major"] {
+        assert!(bad.parse::<TagPattern>().is_err(), "{bad}");
+    }
+
+    let pkg = r#"
+format = 1
+
+[package]
+name = "hdf5"
+owners = ["et"]
+arrangement = "ExternalLibraries"
+thorns = ["HDF5"]
+tag-pattern = "ET_{major}_{minor}_v{patch}"
+since = "2026.5.0"
+"#;
+    let m = Manifest::from_toml(pkg).unwrap();
+    let p = m.package.as_ref().unwrap();
+    assert_eq!(p.tag_pattern.as_deref(), Some("ET_{major}_{minor}_v{patch}"));
+    assert_eq!(p.since, Some(semver::Version::new(2026, 5, 0)));
+    assert_eq!(Manifest::from_toml(&toml::to_string(&m).unwrap()).unwrap(), m);
+    assert!(invalid(&pkg.replace("{patch}", "{build}")).contains("tag-pattern"));
+    assert!(Manifest::from_toml(&pkg.replace("2026.5.0", "2026.5")).is_err());
+
+    let stack = r#"
+format = 1
+
+[stack]
+name = "et-stack"
+thornlist = "einsteintoolkit.th"
+tag-pattern = "ET_{major}_{minor}_v{patch}"
+"#;
+    let s = Manifest::from_toml(stack).unwrap().stack.unwrap();
+    assert_eq!(s.tag_pattern.as_deref(), Some("ET_{major}_{minor}_v{patch}"));
+}

@@ -82,6 +82,14 @@ pub struct PackageSection {
     /// The track shown first on the package page: a track name, or "default" for unprefixed tags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_track: Option<String>,
+    /// How release tags become versions when they aren't `vX.Y.Z`, e.g.
+    /// `ET_{major}_{minor}_v{patch}` (see [`crate::version::TagPattern`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_pattern: Option<String>,
+    /// Release tags below this version aren't versions (say, releases from before the repo
+    /// carried this file).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<semver::Version>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -186,6 +194,9 @@ impl Manifest {
                     && d != DEFAULT_TRACK_KEYWORD
                 {
                     TrackName::from_str(d)?;
+                }
+                if let Some(t) = &p.tag_pattern {
+                    crate::version::TagPattern::from_str(t)?;
                 }
             }
             (None, Some(s)) => s.validate()?,
