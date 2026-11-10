@@ -226,8 +226,7 @@ mod tests {
 
     #[test]
     fn error_body_shape() {
-        let e: ErrorBody =
-            serde_json::from_str(r#"{"error":{"code":"not-found","message":"Not found"}}"#).unwrap();
+        let e: ErrorBody = serde_json::from_str(r#"{"error":{"code":"not-found","message":"Not found"}}"#).unwrap();
         assert_eq!(e.error.code, "not-found");
     }
 }

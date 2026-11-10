@@ -124,21 +124,14 @@ pub struct Caveat {
 
 /// A `contact` must be an https URL or a mailto: address.
 pub fn validate_contact(c: &str) -> Result<()> {
-    let ok = (c.starts_with("https://") && c.len() > "https://".len()
-        || c.starts_with("mailto:") && c.contains('@'))
+    let ok = (c.starts_with("https://") && c.len() > "https://".len() || c.starts_with("mailto:") && c.contains('@'))
         && !c.chars().any(|ch| ch.is_whitespace() || ch.is_control());
-    if ok {
-        Ok(())
-    } else {
-        Err(Error::invalid(format!("contact '{c}' must be an https:// URL or a mailto: address")))
-    }
+    if ok { Ok(()) } else { Err(Error::invalid(format!("contact '{c}' must be an https:// URL or a mailto: address"))) }
 }
 
 fn bare_target(t: &Slug) -> Result<()> {
     if t.thorn.is_some() || t.at.is_some() {
-        return Err(Error::invalid(format!(
-            "claim target '{t}' must be just owner/name (put versions in 'range')"
-        )));
+        return Err(Error::invalid(format!("claim target '{t}' must be just owner/name (put versions in 'range')")));
     }
     Ok(())
 }
@@ -149,12 +142,12 @@ impl Manifest {
     pub fn from_repo_file(filename: &str, text: &str) -> Result<Manifest> {
         let m = Manifest::from_toml(text)?;
         match filename {
-            PACKAGE_FILE if m.package.is_none() => Err(Error::invalid(format!(
-                "{PACKAGE_FILE} must hold a [package]; a stack goes in {STACK_FILE}"
-            ))),
-            STACK_FILE if m.stack.is_none() => Err(Error::invalid(format!(
-                "{STACK_FILE} must hold a [stack]; a package goes in {PACKAGE_FILE}"
-            ))),
+            PACKAGE_FILE if m.package.is_none() => {
+                Err(Error::invalid(format!("{PACKAGE_FILE} must hold a [package]; a stack goes in {STACK_FILE}")))
+            }
+            STACK_FILE if m.stack.is_none() => {
+                Err(Error::invalid(format!("{STACK_FILE} must hold a [stack]; a package goes in {PACKAGE_FILE}")))
+            }
             STACK_FILE if m.stack.as_ref().is_some_and(|s| s.owners.is_empty()) => {
                 Err(Error::invalid(format!("[stack] in {STACK_FILE} needs owners")))
             }
@@ -165,8 +158,7 @@ impl Manifest {
 
     pub fn from_toml(text: &str) -> Result<Manifest> {
         generation::check(text, "cactarium.toml", MANIFEST_FORMAT)?;
-        let m: Manifest =
-            toml::from_str(text).map_err(|source| Error::Toml { what: "cactarium.toml", source })?;
+        let m: Manifest = toml::from_str(text).map_err(|source| Error::Toml { what: "cactarium.toml", source })?;
         m.validate()?;
         Ok(m)
     }
@@ -181,12 +173,8 @@ impl Manifest {
             return Err(Error::invalid(format!("format must be {MANIFEST_FORMAT}")));
         }
         match (&self.package, &self.stack) {
-            (Some(_), Some(_)) => {
-                return Err(Error::invalid("cactarium.toml has both [package] and [stack]"));
-            }
-            (None, None) => {
-                return Err(Error::invalid("cactarium.toml needs a [package] or a [stack] section"));
-            }
+            (Some(_), Some(_)) => return Err(Error::invalid("cactarium.toml has both [package] and [stack]")),
+            (None, None) => return Err(Error::invalid("cactarium.toml needs a [package] or a [stack] section")),
             (Some(p), None) => {
                 if p.owners.is_empty() {
                     return Err(Error::invalid("[package] owners is empty"));

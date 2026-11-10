@@ -43,16 +43,13 @@ fn strip_comment(line: &str) -> &str {
 
 /// Splits a list written with spaces and/or commas.
 fn words(s: &str) -> impl Iterator<Item = String> + '_ {
-    s.split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|w| !w.is_empty())
-        .map(str::to_owned)
+    s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).map(str::to_owned)
 }
 
 /// A capability name without a version constraint: `HDF5(>=1.10)` → `HDF5`.
 fn bare_capability(w: &str) -> Option<String> {
     let name = w.split('(').next().unwrap_or("").trim();
-    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-        .then(|| name.to_owned())
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| name.to_owned())
 }
 
 /// Splits `KEYWORD rest` case-insensitively; `rest` keeps its case.
@@ -106,9 +103,7 @@ impl ThornFacts {
                 f.implements = words(after_colon(rest)).next();
             } else if let Some(rest) = after_keyword(line, "INHERITS") {
                 f.inherits.extend(words(after_colon(rest)));
-            } else if let Some(rest) =
-                after_keyword(line, "FRIENDS").or_else(|| after_keyword(line, "FRIEND"))
-            {
+            } else if let Some(rest) = after_keyword(line, "FRIENDS").or_else(|| after_keyword(line, "FRIEND")) {
                 f.friends.extend(words(after_colon(rest)));
             } else if let Some(rest) = after_keyword(line, "REQUIRES") {
                 if let Some(name) = after_keyword(rest.trim_start(), "FUNCTION") {
@@ -125,9 +120,7 @@ impl ThornFacts {
                 } else if let Some(inc) = after_keyword(rest, "INCLUDE") {
                     // USES INCLUDE [SOURCE|HEADER]: file.h ...
                     let inc = inc.trim_start();
-                    let inc = after_keyword(inc, "SOURCE")
-                        .or_else(|| after_keyword(inc, "HEADER"))
-                        .unwrap_or(inc);
+                    let inc = after_keyword(inc, "SOURCE").or_else(|| after_keyword(inc, "HEADER")).unwrap_or(inc);
                     f.uses_includes.extend(words(after_colon(inc)));
                 }
             }
@@ -333,8 +326,7 @@ PROVIDES CarpetX
         std::fs::write(&secret, "IMPLEMENTS: s3cret\n").unwrap();
         std::os::unix::fs::symlink(&secret, root.join("Arr/Evil/interface.ccl")).unwrap();
         std::os::unix::fs::symlink("/dev/zero", root.join("Arr/Evil/configuration.ccl")).unwrap();
-        std::fs::write(root.join("Arr/Big/interface.ccl"), "#".repeat(MAX_CCL_BYTES as usize + 1))
-            .unwrap();
+        std::fs::write(root.join("Arr/Big/interface.ccl"), "#".repeat(MAX_CCL_BYTES as usize + 1)).unwrap();
         assert!(scan_tree(&root).is_empty(), "{:?}", scan_tree(&root));
         std::fs::remove_dir_all(&root).unwrap();
     }

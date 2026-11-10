@@ -131,10 +131,7 @@ impl RepoPin {
     /// What this record pins its repo to, as [`crate::crl::pin_text`] writes it.
     pub fn pin(&self) -> Option<crate::crl::Pin> {
         use crate::crl::Pin;
-        self.commit
-            .clone()
-            .map(Pin::Commit)
-            .or_else(|| self.sha256.clone().map(Pin::Sha256))
+        self.commit.clone().map(Pin::Commit).or_else(|| self.sha256.clone().map(Pin::Sha256))
     }
 }
 
@@ -220,10 +217,7 @@ pub(crate) fn validate_repos(repos: &[RepoPin]) -> Result<()> {
         if let Some(c) = &r.commit
             && !is_hex(c, &[40, 64])
         {
-            return Err(Error::invalid(format!(
-                "repo '{}': '{c}' is not a full lowercase commit id",
-                r.name
-            )));
+            return Err(Error::invalid(format!("repo '{}': '{c}' is not a full lowercase commit id", r.name)));
         }
         if let Some(h) = &r.sha256
             && !is_hex(h, &[64])
@@ -244,8 +238,7 @@ fn plain_filename(what: &str, f: &str) -> Result<()> {
 impl SimFile {
     pub fn from_toml(text: &str) -> Result<SimFile> {
         generation::check(text, "the .sim file", SIM_FORMAT)?;
-        let sim: SimFile =
-            toml::from_str(text).map_err(|source| Error::Toml { what: "the .sim file", source })?;
+        let sim: SimFile = toml::from_str(text).map_err(|source| Error::Toml { what: "the .sim file", source })?;
         sim.validate()?;
         Ok(sim)
     }

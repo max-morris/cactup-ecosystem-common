@@ -1,7 +1,5 @@
 use cactup_ecosystem_common::Error;
-use cactup_ecosystem_common::sim::{
-    ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified,
-};
+use cactup_ecosystem_common::sim::{ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified};
 
 const SHA: &str = "3f2c9e1a00112233445566778899aabbccddeeff";
 
@@ -18,11 +16,7 @@ fn sample(thornlist: &str, par: &str) -> SimFile {
             cactarium: None,
             root: "Cactus".into(),
         },
-        thornlist: ThornlistText {
-            filename: "bhns.th".into(),
-            text: thornlist.into(),
-            untracked: vec![],
-        },
+        thornlist: ThornlistText { filename: "bhns.th".into(), text: thornlist.into(), untracked: vec![] },
         parfile: Parfile {
             filename: "bhns.par".into(),
             kind: ParfileKind::Par,
@@ -188,9 +182,7 @@ fn structural_errors() {
 /// CACTUP_TEST_PARFILE name them.
 #[test]
 fn real_files_round_trip() {
-    let (Some(th), Some(par)) =
-        (std::env::var_os("CACTUP_TEST_THORNLIST"), std::env::var_os("CACTUP_TEST_PARFILE"))
-    else {
+    let (Some(th), Some(par)) = (std::env::var_os("CACTUP_TEST_THORNLIST"), std::env::var_os("CACTUP_TEST_PARFILE")) else {
         return;
     };
     let (Ok(th), Ok(par)) = (std::fs::read_to_string(th), std::fs::read_to_string(par)) else { return };

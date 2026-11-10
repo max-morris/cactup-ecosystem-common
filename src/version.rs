@@ -41,10 +41,7 @@ impl TrackName {
         if !first.is_ascii_lowercase() {
             return bad("it must start with a lowercase letter");
         }
-        if let Some(c) = s
-            .chars()
-            .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(*c)))
-        {
+        if let Some(c) = s.chars().find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(*c))) {
             return bad(&format!("'{c}' is not allowed"));
         }
         if s == DEFAULT_TRACK_KEYWORD || s == "x" || s == crate::slug::HEAD || s == crate::slug::MASTER {
@@ -174,14 +171,8 @@ impl TrackedReq {
     }
 
     /// The highest version in `candidates` that this range matches.
-    pub fn best_match<'a>(
-        &self,
-        candidates: impl IntoIterator<Item = &'a TrackedVersion>,
-    ) -> Option<&'a TrackedVersion> {
-        candidates
-            .into_iter()
-            .filter(|v| self.matches(v))
-            .max_by(|a, b| a.version.cmp(&b.version))
+    pub fn best_match<'a>(&self, candidates: impl IntoIterator<Item = &'a TrackedVersion>) -> Option<&'a TrackedVersion> {
+        candidates.into_iter().filter(|v| self.matches(v)).max_by(|a, b| a.version.cmp(&b.version))
     }
 }
 
@@ -235,18 +226,13 @@ mod tests {
         assert_eq!(TrackedVersion::from_tag("1.2.3"), Some(v("1.2.3")));
         assert_eq!(TrackedVersion::from_tag("refs/tags/v1.2.3"), Some(v("1.2.3")));
         assert_eq!(TrackedVersion::from_tag("mixed-precision/v1.2.3"), Some(v("mixed-precision:1.2.3")));
-        assert_eq!(
-            TrackedVersion::from_tag("mixed-precision/v2.0.0-rc.1"),
-            Some(v("mixed-precision:2.0.0-rc.1"))
-        );
+        assert_eq!(TrackedVersion::from_tag("mixed-precision/v2.0.0-rc.1"), Some(v("mixed-precision:2.0.0-rc.1")));
         assert_eq!(v("mixed-precision:1.2.3").conventional_tag(), "mixed-precision/v1.2.3");
     }
 
     #[test]
     fn non_version_tags_are_ignored() {
-        for tag in
-            ["ET_2026_05", "mixed-precision-1", "v1.2", "a/b/v1.2.3", "Upper/v1.2.3", "default/v1.0.0"]
-        {
+        for tag in ["ET_2026_05", "mixed-precision-1", "v1.2", "a/b/v1.2.3", "Upper/v1.2.3", "default/v1.0.0"] {
             assert_eq!(TrackedVersion::from_tag(tag), None, "{tag}");
         }
     }
