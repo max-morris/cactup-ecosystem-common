@@ -42,6 +42,7 @@ fn section_key(c: &Component) -> impl PartialEq + '_ {
         &c.repo_path,
         &c.branch,
         &c.commit,
+        &c.checksum,
     )
 }
 
@@ -61,7 +62,8 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
     while i < components.len() {
         let first = &components[i];
         let mut j = i + 1;
-        while j < components.len() && section_key(&components[j]) == section_key(first) {
+        // A checksum names one file, so a checksummed download is a section of its own.
+        while j < components.len() && first.checksum.is_none() && section_key(&components[j]) == section_key(first) {
             j += 1;
         }
         let d = |out: &mut String, k: &str, v: &Option<String>| {
@@ -78,6 +80,7 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
         d(&mut out, "REPO_PATH", &first.repo_path);
         d(&mut out, "REPO_BRANCH", &first.branch);
         d(&mut out, "REPO_COMMIT", &first.commit);
+        d(&mut out, "CHECKSUM_SHA256", &first.checksum);
         d(&mut out, "NAME", &first.name);
         let group = &components[i..j];
         let inline: Vec<&str> = group.iter().filter(|c| c.fetch_only).map(|c| c.checkout.as_str()).collect();
@@ -151,6 +154,22 @@ CarpetX/Arith
         assert_eq!(text.matches("ExternalLibraries-").count(), 2, "{text}");
     }
 
+    /// Checksummed downloads round-trip, each in a section of its own even when every other
+    /// directive matches (a checksum names one file).
+    #[test]
+    fn checksums_round_trip_one_section_each() {
+        let h = "d".repeat(64);
+        let src = format!(
+            "!CRL_VERSION = 1.0\n!TARGET = dl\n!TYPE = https\n!URL = https://x/f\n!CHECKSUM_SHA256 = {h}\n!CHECKOUT = a.tgz\n\n\
+             !TARGET = dl\n!TYPE = https\n!URL = https://x/f\n!CHECKSUM_SHA256 = {h}\n!CHECKOUT = b.tgz\n"
+        );
+        let a = parse(&src).unwrap();
+        let text = emit(a.root(), a.components(), a.disabled_thorns(), None);
+        let b = parse(&text).unwrap_or_else(|e| panic!("{e:#}\n{text}"));
+        assert_eq!(a.components(), b.components(), "{text}");
+        assert_eq!(text.matches("!CHECKSUM_SHA256").count(), 2, "{text}");
+    }
+
     /// Every thorn written on a `!` line, i.e. fetched but not built.
     pub(crate) fn thorns_on_bang_lines(text: &str) -> Vec<String> {
         text.lines()
@@ -169,8 +188,12 @@ CarpetX/Arith
         assert!(a.components().iter().any(|c| c.fetch_only), "an ET list has checkout-only thorns");
         let text = emit(a.root(), a.components(), a.disabled_thorns(), None);
         assert_eq!(parse(&text).unwrap().components(), a.components());
-        let pins: std::collections::BTreeMap<String, String> =
-            a.components().iter().filter(|c| c.ty == crate::crl::ComponentType::Git).map(|c| (c.repo.clone(), "a".repeat(40))).collect();
+        let pins: std::collections::BTreeMap<String, crate::crl::Pin> = a
+            .components()
+            .iter()
+            .filter(|c| c.ty == crate::crl::ComponentType::Git)
+            .map(|c| (c.repo.clone(), crate::crl::Pin::Commit("a".repeat(40))))
+            .collect();
         let pinned = parse(&crate::crl::pin_text(&src, &pins).unwrap()).unwrap();
         let key = |c: &crate::crl::Component| (c.repo.clone(), c.checkout.clone(), c.fetch_only);
         let mut want: Vec<_> = a.components().iter().map(key).collect();

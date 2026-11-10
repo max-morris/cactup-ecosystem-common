@@ -127,6 +127,14 @@ pub struct RepoPin {
     pub dirty: bool,
 }
 
+impl RepoPin {
+    /// What this record pins its repo to, as [`crate::crl::pin_text`] writes it.
+    pub fn pin(&self) -> Option<crate::crl::Pin> {
+        use crate::crl::Pin;
+        self.commit.clone().map(Pin::Commit).or_else(|| self.sha256.clone().map(Pin::Sha256))
+    }
+}
+
 /// Suggested run shape, used only as defaults by `cactup import`. Machine-shaped settings
 /// (nodes, tasks per node, queue) are deliberately absent: they follow from the target machine.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

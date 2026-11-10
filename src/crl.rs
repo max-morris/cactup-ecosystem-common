@@ -1,7 +1,7 @@
 //! The CRL 1.0 thornlist parser, shared by cactup and the Cactarium registry.
 //!
 //! Copied from cactup's `src/thornlist.rs` (branch feature/cactarium, 2026-11-05, with the
-//! `!REPO_COMMIT` pin extension), minus the parts that read an installed tree
+//! `!REPO_COMMIT` pin extension; `!CHECKSUM_SHA256` came later), minus the parts that read an installed tree
 //! (`parse_config_list` and its helpers stay in cactup). Parse semantics are a contract between
 //! cactup and the registry: change them only together, and treat a change as a `.sim`/API format
 //! question.
@@ -122,6 +122,11 @@ pub struct Component {
     /// repo is checked out detached at exactly this commit and never
     /// fast-forwarded.
     pub commit: Option<String>,
+    /// `!CHECKSUM_SHA256`: the SHA-256 of a download (`http`/`https`/`ftp`), as 64 lowercase hex
+    /// digits; a section carrying one checks out exactly one file. A cactup extension like
+    /// `commit` (GetComponents ignores it and downloads unchecked); cactup refuses a download that
+    /// does not match.
+    pub checksum: Option<String>,
     /// Written on the `!CHECKOUT` line itself rather than on a line of its own. Cactus also reads
     /// a CRL list as its ThornList, and that reader skips every line starting with `!`, so such a
     /// thorn is fetched but not built: the Einstein Toolkit's list uses this for checkout-only
@@ -614,6 +619,7 @@ fn build_section(
                     repo_path: map.get("REPO_PATH").cloned(),
                     branch: map.get("REPO_BRANCH").cloned(),
                     commit: None,
+                    checksum: None,
                     fetch_only: inline.contains(&token),
                     repo,
                 });
@@ -642,6 +648,7 @@ fn build_section(
         .ok_or_else(|| anyhow!("Section for target '{target}' (type {type_str:?}) is missing the required !URL directive"))?;
     let auth_url_orig = map.get("AUTH_URL").cloned();
     let commit = map.get("REPO_COMMIT").map(|c| parse_commit(c, &target, ty)).transpose()?;
+    let checksum = map.get("CHECKSUM_SHA256").map(|h| parse_checksum(h, &target, ty, checkout_val)).transpose()?;
 
     let inline = inline_checkouts(checkout_val);
     for token in checkout_val.split_whitespace() {
@@ -662,11 +669,30 @@ fn build_section(
             repo_path: map.get("REPO_PATH").cloned(),
             branch: map.get("REPO_BRANCH").cloned(),
             commit: commit.clone(),
+            checksum: checksum.clone(),
             fetch_only: inline.contains(&token),
             repo,
         });
     }
     Ok(())
+}
+
+/// A `!CHECKSUM_SHA256` value: 64 hex digits, normalized to lowercase, on a download section with
+/// exactly one checkout. A hash names one file, so a section that downloads several cannot carry
+/// one, and nothing would honor it on any other type.
+fn parse_checksum(value: &str, target: &str, ty: ComponentType, checkout_val: &str) -> Res<String> {
+    if !matches!(ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp) {
+        bail!("Section for target '{target}' has !CHECKSUM_SHA256, which only http, https and ftp components support");
+    }
+    let n = checkout_val.split_whitespace().count();
+    if n != 1 {
+        bail!("Section for target '{target}' has !CHECKSUM_SHA256 but checks out {n} files; a checksum names one");
+    }
+    let hash = value.trim().to_ascii_lowercase();
+    if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("Section for target '{target}' has !CHECKSUM_SHA256 '{}', which is not 64 hex digits", value.trim());
+    }
+    Ok(hash)
 }
 
 /// A `!REPO_COMMIT` value: a full commit id (40 hex digits, or 64 for a
@@ -784,8 +810,32 @@ fn source_desc(c: &Component) -> String {
     }
 }
 
-/// `text` with each repo in `pins` (repo name → full commit id) pinned by a
-/// `!REPO_COMMIT` (§3.2), and nothing else changed: the header, comments and
+/// What [`pin_text`] writes for one repo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pin {
+    /// A full commit id, written as `!REPO_COMMIT` (git).
+    Commit(String),
+    /// A download's SHA-256, written as `!CHECKSUM_SHA256` (one file).
+    Sha256(String),
+}
+
+impl Pin {
+    /// The directive line this pin is written as.
+    fn line(&self) -> String {
+        match self {
+            Pin::Commit(c) => format!("!REPO_COMMIT = {c}\n"),
+            Pin::Sha256(h) => format!("!CHECKSUM_SHA256 = {h}\n"),
+        }
+    }
+
+    /// The pin a parsed component already carries, if any.
+    pub fn of(c: &Component) -> Option<Pin> {
+        c.commit.clone().map(Pin::Commit).or_else(|| c.checksum.clone().map(Pin::Sha256))
+    }
+}
+
+/// `text` with each repo in `pins` pinned (§3.2) — a git repo by `!REPO_COMMIT`, a download by
+/// `!CHECKSUM_SHA256` — and nothing else changed: the header, comments and
 /// every section without a pinned repo stay byte for byte. A section whose
 /// components all come from one repo gains the directive just before its
 /// `!CHECKOUT` (or has an existing one rewritten). A section that spans
@@ -796,12 +846,18 @@ fn source_desc(c: &Component) -> String {
 /// same checkouts with exactly these pins, or this fails rather than return
 /// a list that means something else. A pin for a repo the list does not
 /// name is an error too.
-pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -> Res<String> {
+pub fn pin_text(text: &str, pins: &BTreeMap<String, Pin>) -> Res<String> {
     use anyhow::{bail, Context};
     let original = parse(text).context("The thornlist does not parse")?;
-    for repo in pins.keys() {
-        if !original.components().iter().any(|c| &c.repo == repo) {
+    for (repo, pin) in pins {
+        let of_repo: Vec<&Component> = original.components().iter().filter(|c| &c.repo == repo).collect();
+        if of_repo.is_empty() {
             bail!("A pin names repo {repo}, which the thornlist does not");
+        }
+        if let Pin::Sha256(_) = pin
+            && of_repo.len() != 1
+        {
+            bail!("Repo {repo} has a checksum but the thornlist downloads {} files from it; a checksum names one", of_repo.len());
         }
     }
     let target_re = regex::Regex::new(r"(?m)^!TARGET\s*=").expect("valid regex");
@@ -836,11 +892,13 @@ pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -
             continue;
         }
         if let [(repo, _)] = repos.as_slice() {
-            out.push_str(&pin_section(section, None, &pins[repo]));
+            out.push_str(&pin_section(section, None, Some(&pins[repo])));
             continue;
         }
         for (n, (repo, checkouts)) in repos.iter().enumerate() {
-            let pin = pins.get(repo).map_or("", String::as_str);
+            // A repo without a new pin keeps whatever pin the section gave it.
+            let kept = alone.components().iter().find(|c| &c.repo == repo).and_then(Pin::of);
+            let pin = pins.get(repo).or(kept.as_ref());
             out.push_str(&pin_section(section, Some((checkouts, n == 0, n + 1 == repos.len())), pin));
         }
     }
@@ -855,15 +913,16 @@ pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -
         bail!("Pinning changed which checkouts the thornlist names (a bug in pinning this list)");
     }
     for c in pinned.components() {
-        let expected = pins.get(&c.repo).or(original.components().iter().find(|o| o.repo == c.repo).and_then(|o| o.commit.as_ref()));
-        if c.commit.as_ref() != expected {
-            bail!("Pinning left repo {} at {:?} instead of {:?} (a bug in pinning this list)", c.repo, c.commit, expected);
+        let kept = || original.components().iter().find(|o| o.repo == c.repo).and_then(Pin::of);
+        let expected = pins.get(&c.repo).cloned().or_else(kept);
+        if Pin::of(c) != expected {
+            bail!("Pinning left repo {} at {:?} instead of {:?} (a bug in pinning this list)", c.repo, Pin::of(c), expected);
         }
     }
     Ok(out)
 }
 
-/// One section, pinned to `commit` (empty: no pin, any existing one dropped)
+/// One section, pinned to `pin` (`None`: no pin, any existing one dropped)
 /// and, with `checkouts`, narrowed to them. Of a split section's checkout
 /// lines, the comments among the checkouts (a `#DISABLED` one included) go
 /// in the first copy and whatever follows the last checkout (blank lines and
@@ -873,7 +932,7 @@ pub fn pin_text(text: &str, pins: &std::collections::BTreeMap<String, String>) -
 /// first and the last of the split.
 type SplitCheckouts<'a> = Option<(&'a Vec<(String, bool)>, bool, bool)>;
 
-fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, commit: &str) -> String {
+fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, pin: Option<&Pin>) -> String {
     let key_re = regex::Regex::new(r"(?m)^\s*!([^\s=]+)\s*=").expect("valid regex");
     let keys: Vec<(String, usize)> =
         key_re.captures_iter(section).map(|c| (c[1].to_owned(), c.get(0).expect("match").start())).collect();
@@ -883,14 +942,14 @@ fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, commit: &str) -> St
     for (i, (key, start)) in keys.iter().enumerate() {
         match key.as_str() {
             // Dropped here, written back just before !CHECKOUT.
-            "REPO_COMMIT" => {
+            "REPO_COMMIT" | "CHECKSUM_SHA256" => {
                 out.push_str(&section[done..*start]);
                 done = next_line(section, value_end(i));
             }
             "CHECKOUT" => {
                 out.push_str(&section[done..*start]);
-                if !commit.is_empty() {
-                    out.push_str(&format!("!REPO_COMMIT = {commit}\n"));
+                if let Some(pin) = pin {
+                    out.push_str(&pin.line());
                 }
                 match checkouts {
                     None => done = *start,
@@ -1682,8 +1741,8 @@ Numerical/PrivateThorn
                     !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
                     !CHECKOUT =\n  ET/Alpha\n#DISABLED ET/Gamma\n  ET/Beta\n\n\
                     # untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n";
-        let pins: std::collections::BTreeMap<String, String> =
-            [("flesh", &a), ("Alpha", &b), ("Beta", &c)].iter().map(|(r, p)| (r.to_string(), p.to_string())).collect();
+        let pins: BTreeMap<String, Pin> =
+            [("flesh", &a), ("Alpha", &b), ("Beta", &c)].iter().map(|(r, p)| (r.to_string(), Pin::Commit(p.to_string()))).collect();
         let out = pin_text(text, &pins).unwrap();
 
         let list = parse(&out).unwrap();
@@ -1704,7 +1763,7 @@ Numerical/PrivateThorn
         // A checkout-only thorn (on the !CHECKOUT line) stays fetch-only when its section is split.
         let et = "!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
                   !CHECKOUT = E/PETSc\nE/Base\n";
-        let pins: std::collections::BTreeMap<String, String> = [("PETSc".to_string(), a.clone())].into_iter().collect();
+        let pins: BTreeMap<String, Pin> = [("PETSc".to_string(), Pin::Commit(a.clone()))].into_iter().collect();
         let split = pin_text(et, &pins).unwrap();
         let fetch_only: Vec<(String, bool)> = parse(&split).unwrap().components().iter().map(|c| (c.checkout.clone(), c.fetch_only)).collect();
         assert_eq!(fetch_only, [("E/PETSc".to_string(), true), ("E/Base".to_string(), false)], "{split}");
@@ -1712,8 +1771,65 @@ Numerical/PrivateThorn
         // No pins: nothing changes at all.
         assert_eq!(pin_text(text, &Default::default()).unwrap(), text);
         // A pin for a repo the list does not name.
-        let stray = [("nope".to_string(), a.clone())].into_iter().collect();
+        let stray = [("nope".to_string(), Pin::Commit(a.clone()))].into_iter().collect();
         assert!(format!("{:#}", pin_text(text, &stray).unwrap_err()).contains("nope"));
+    }
+
+    /// `!CHECKSUM_SHA256` (a cactup extension): 64 hex digits, lowercased, on a download section
+    /// with one checkout; anything else is refused.
+    #[test]
+    fn checksum_pins_one_download() {
+        let hash = "AB".repeat(32);
+        let section = |ty: &str, hash: &str, checkout: &str| {
+            format!("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = {ty}\n!URL = https://x/dl\n!CHECKSUM_SHA256 = {hash}\n!CHECKOUT = {checkout}\n")
+        };
+        let t = ok(&section("https", &hash, "lib.tar.gz"));
+        assert_eq!(t.components()[0].checksum.as_deref(), Some(hash.to_ascii_lowercase().as_str()));
+        assert_eq!(t.components()[0].commit, None);
+        ok(&section("http", &hash, "lib.tar.gz"));
+        assert!(err(&section("https", &hash[..63], "lib.tar.gz")).contains("not 64 hex digits"));
+        assert!(err(&section("https", &format!("{}g", &hash[..63]), "lib.tar.gz")).contains("not 64 hex digits"));
+        assert!(err(&section("git", &hash, "A/B")).contains("only http, https and ftp"));
+        assert!(err(&section("https", &hash, "a.tgz b.tgz")).contains("checks out 2 files"));
+        // Unchecked stays unchecked.
+        let t = ok("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = https\n!URL = https://x/dl\n!CHECKOUT = lib.tar.gz\n");
+        assert_eq!(t.components()[0].checksum, None);
+    }
+
+    /// `pin_text` writes a checksum for a download repo, rewrites an old one, keeps an existing pin
+    /// on an unpinned repo of a split section, and refuses a checksum for a repo of several files.
+    #[test]
+    fn pin_text_writes_checksums() {
+        let h = "c".repeat(64);
+        let text = "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n\
+                    !TARGET = $ROOT/arrangements/ExternalLibraries/Z/dist\n!TYPE = https\n!URL = https://x/zlib\n\
+                    !CHECKSUM_SHA256 = 0000000000000000000000000000000000000000000000000000000000000000\n\
+                    !CHECKOUT = zlib-1.3.tar.gz\n\n\
+                    !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://x/$1\n!CHECKOUT = one/a.tgz two/b.tgz\n";
+        let pins: BTreeMap<String, Pin> =
+            [("zlib".to_string(), Pin::Sha256(h.clone())), ("one".to_string(), Pin::Sha256(h.clone()))].into_iter().collect();
+        let out = pin_text(text, &pins).unwrap();
+        let list = parse(&out).unwrap();
+        let sum = |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().checksum.clone();
+        assert_eq!(sum("zlib"), Some(h.clone()));
+        assert_eq!(sum("one"), Some(h.clone()));
+        assert_eq!(sum("two"), None);
+        assert!(!out.contains("00000000"), "the old checksum is rewritten, not doubled: {out}");
+        assert_eq!(out.matches("!URL = https://x/$1").count(), 2, "the $1 section is split per repo: {out}");
+
+        // A repo with several downloads cannot take one checksum.
+        let several = "!CRL_VERSION = 1.0\n!TARGET = dl\n!TYPE = https\n!URL = https://x/files\n!CHECKOUT = a.tgz b.tgz\n";
+        let pins = [("files".to_string(), Pin::Sha256(h.clone()))].into_iter().collect();
+        assert!(format!("{:#}", pin_text(several, &pins).unwrap_err()).contains("downloads 2 files"));
+
+        // A split section keeps the pin it gave a repo that gets no new one.
+        let shared = "!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
+                      !REPO_COMMIT = 0123456789abcdef0123456789abcdef01234567\n!CHECKOUT =\nE/A\nE/B\n";
+        let pins = [("A".to_string(), Pin::Commit("f".repeat(40)))].into_iter().collect();
+        let list = parse(&pin_text(shared, &pins).unwrap()).unwrap();
+        let commit = |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().commit.clone();
+        assert_eq!(commit("A"), Some("f".repeat(40)));
+        assert_eq!(commit("B"), Some("0123456789abcdef0123456789abcdef01234567".to_string()));
     }
 
 }
