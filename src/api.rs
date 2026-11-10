@@ -118,7 +118,11 @@ pub struct EntryInfo {
 pub struct ThornInfo {
     pub arrangement: String,
     pub thorn: String,
-    /// The thorn's directory in the repo (what `!REPO_PATH` resolves to for its checkout).
+    /// The `!REPO_PATH` to write for this thorn's checkout (`Arrangement/Thorn`) in a section that
+    /// clones the package's repo, derived by the Cactarium from where the thorn sits in the repo:
+    /// `$1/$2` for `Arrangement/Thorn/`, `$2` for a thorn at the root (`path/$2` for
+    /// `path/Thorn/`), and `../$1-$2` for a repo that is itself the thorn, whose clone must then be
+    /// named `Arrangement-Thorn` (the Einstein Toolkit's convention for ExternalLibraries).
     pub repo_path: String,
     pub facts: ThornFacts,
 }
