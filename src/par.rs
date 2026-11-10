@@ -55,8 +55,12 @@ pub fn comment_spans(text: &str) -> Vec<Range<usize>> {
     enum St {
         Code,
         /// Inside `"…"`; `continued` once a newline has passed.
-        Str { continued: bool },
-        StrComment { start: usize },
+        Str {
+            continued: bool,
+        },
+        StrComment {
+            start: usize,
+        },
     }
     let b = text.as_bytes();
     let mut spans = Vec::new();
@@ -272,7 +276,9 @@ fn computed_token(cur: &mut Cursor<'_>, at: usize, source: Source, refs: &mut Re
     let func = source.func();
     let optional = cur.eat(b'-');
     if optional && !cur.eat_str("OPTIONAL") {
-        bail!("Malformed @{func}-…@ token on line {at}: the only suffix is -OPTIONAL (@{func}-OPTIONAL(…)@)");
+        bail!(
+            "Malformed @{func}-…@ token on line {at}: the only suffix is -OPTIONAL (@{func}-OPTIONAL(…)@)"
+        );
     }
     let form = if optional { format!("{func}-OPTIONAL") } else { func.to_owned() };
     if !cur.eat(b'(') {
@@ -284,7 +290,9 @@ fn computed_token(cur: &mut Cursor<'_>, at: usize, source: Source, refs: &mut Re
     cur.skip_ws();
     if cur.eat(b',') {
         if !optional {
-            bail!("@{func}({arg})@ on line {at} takes no default value; use @{func}-OPTIONAL({arg}, …)@ for a default");
+            bail!(
+                "@{func}({arg})@ on line {at} takes no default value; use @{func}-OPTIONAL({arg}, …)@ for a default"
+            );
         }
         cur.skip_ws();
         parse_default(cur, at, &form, arg)?;
@@ -313,14 +321,18 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Resu
             let mut bytes = Vec::new();
             loop {
                 match cur.bump() {
-                    None => bail!("Unterminated quoted default value in @{form}({arg}, …)@ on line {at}"),
+                    None => {
+                        bail!("Unterminated quoted default value in @{form}({arg}, …)@ on line {at}")
+                    }
                     Some(b'\\') => match cur.bump() {
                         Some(c @ (b'"' | b'\'' | b'\\')) => bytes.push(c),
                         Some(c) => {
                             bytes.push(b'\\');
                             bytes.push(c);
                         }
-                        None => bail!("Unterminated quoted default value in @{form}({arg}, …)@ on line {at}"),
+                        None => {
+                            bail!("Unterminated quoted default value in @{form}({arg}, …)@ on line {at}")
+                        }
                     },
                     Some(b) if b == quote => break,
                     Some(b) => bytes.push(b),
@@ -342,7 +354,9 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Resu
             };
             if !closes {
                 match next {
-                    None => bail!("Malformed @{form}({arg}, …)@ token on line {at}: expected ')@' to close it"),
+                    None => bail!(
+                        "Malformed @{form}({arg}, …)@ token on line {at}: expected ')@' to close it"
+                    ),
                     Some(c) => bail!(
                         "Unquoted default value in @{form}({arg}, …)@ on line {at} contains '{c}'; only letters \
                          and digits may go unquoted, so quote it: @{form}({arg}, \"…\")@"
@@ -350,7 +364,9 @@ fn parse_default(cur: &mut Cursor<'_>, at: usize, form: &str, arg: &str) -> Resu
                 }
             }
             if bare.is_empty() {
-                bail!("Empty default value in @{form}({arg}, )@ on line {at}: write \"\" for an empty default, or drop the comma");
+                bail!(
+                    "Empty default value in @{form}({arg}, )@ on line {at}: write \"\" for an empty default, or drop the comma"
+                );
             }
             Ok(bare.to_owned())
         }
@@ -390,7 +406,8 @@ mod tests {
                    A::c = \"@KNOB-OPTIONAL(kadath-initial-data, x)@ @ENV(HOME)@\"\n";
         let refs = references(par).unwrap();
         assert_eq!(refs.vars, ["SIMULATION_NAME", "WALLTIME_HOURS"]);
-        let knobs: Vec<(&str, bool)> = refs.knobs.iter().map(|r| (r.name.as_str(), r.optional)).collect();
+        let knobs: Vec<(&str, bool)> =
+            refs.knobs.iter().map(|r| (r.name.as_str(), r.optional)).collect();
         assert_eq!(knobs, [("kadath-initial-data", false), ("mail", true)]);
         assert_eq!(refs.env, [Reference { name: "HOME".into(), optional: false }]);
     }
@@ -413,7 +430,14 @@ mod tests {
         assert!(err.contains("line 2"), "{err}");
         assert!(references("x = \"@KNOB(Bad)@\"\n").is_err());
         assert!(references("x = \"@KNOB(a, b)@\"\n").is_err(), "a default needs -OPTIONAL");
-        assert!(references("x = \"@KNOB-OPTIONAL(a, two words)@\"\n").is_err(), "an unquoted default with a blank");
-        assert_eq!(references("x = \"@KNOB-OPTIONAL(a, 'q w')@\"\n").unwrap().knobs.len(), 1, "a quoted default may hold a blank");
+        assert!(
+            references("x = \"@KNOB-OPTIONAL(a, two words)@\"\n").is_err(),
+            "an unquoted default with a blank"
+        );
+        assert_eq!(
+            references("x = \"@KNOB-OPTIONAL(a, 'q w')@\"\n").unwrap().knobs.len(),
+            1,
+            "a quoted default may hold a blank"
+        );
     }
 }

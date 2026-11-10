@@ -67,14 +67,19 @@ impl Slug {
     pub fn req(&self) -> Result<TrackedReq> {
         match &self.at {
             None => Ok(TrackedReq { track: None, req: semver::VersionReq::STAR }),
-            Some(at) if at == HEAD || at == MASTER => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
+            Some(at) if at == HEAD || at == MASTER => {
+                Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version")))
+            }
             Some(at) => at.parse(),
         }
     }
 
     /// The `@` part as one exact version (`1.4.0`, `mixed-precision:1.4.0`).
     pub fn exact(&self) -> Result<TrackedVersion> {
-        let at = self.at.as_deref().ok_or_else(|| Error::invalid(format!("'{self}' names no version")))?;
+        let at = self
+            .at
+            .as_deref()
+            .ok_or_else(|| Error::invalid(format!("'{self}' names no version")))?;
         at.parse()
     }
 

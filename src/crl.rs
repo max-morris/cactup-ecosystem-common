@@ -200,10 +200,8 @@ pub fn parse_with_base(src: &str, include_base: Option<&Path>) -> Res<Thornlist>
     // 14. Duplicate-checkout detection, lexical only, no filesystem access.
     detect_duplicates(&all_components, &section_of, &root)?;
 
-    let components: Vec<Component> = all_components
-        .into_iter()
-        .filter(|c| c.ty != ComponentType::Ignore)
-        .collect();
+    let components: Vec<Component> =
+        all_components.into_iter().filter(|c| c.ty != ComponentType::Ignore).collect();
 
     Ok(Thornlist {
         components,
@@ -223,7 +221,12 @@ impl Thornlist {
     /// caller that reads the installed tree to find each thorn's repo: cactup's
     /// `parse_config_list`. `disabled_thorns` comes from `text`'s `#DISABLED` lines;
     /// `crl_version` is empty and `is_plain()` is true.
-    pub fn from_plain(text: &str, root: String, components: Vec<Component>, untracked: Vec<String>) -> Thornlist {
+    pub fn from_plain(
+        text: &str,
+        root: String,
+        components: Vec<Component>,
+        untracked: Vec<String>,
+    ) -> Thornlist {
         Thornlist {
             components,
             disabled_thorns: collect_disabled(text),
@@ -327,8 +330,8 @@ pub fn splice_includes(text: &str, base: Option<&Path>) -> Res<String> {
         if is_url(target) {
             bail!("!INCLUDE of URL '{target}' is not yet supported; only local-path includes are");
         }
-        let base_dir = base
-            .ok_or_else(|| anyhow!("!INCLUDE '{target}' has no base directory to resolve against"))?;
+        let base_dir =
+            base.ok_or_else(|| anyhow!("!INCLUDE '{target}' has no base directory to resolve against"))?;
         let include_path = base_dir.join(target);
         let include_src = std::fs::read_to_string(&include_path)
             .with_context(|| format!("Failed to read !INCLUDE file '{}'", include_path.display()))?;
@@ -401,7 +404,9 @@ fn collect_defines(body: &str, experimental: bool) -> Res<(HashMap<String, Strin
         } else {
             raw_value.to_string()
         };
-        if let Some(existing) = defines.get(&key) && existing != &value {
+        if let Some(existing) = defines.get(&key)
+            && existing != &value
+        {
             if experimental {
                 warnings.push(format!("Repeated definition of {key} on line {}, ignored", idx + 1));
                 continue;
@@ -521,7 +526,11 @@ fn build_kv_map(full_section: &str) -> HashMap<String, String> {
         let mut value = full_section[*value_start..value_end].trim_end().to_owned();
         // The pattern's trailing `\s*` swallows a newline after `=`. For !CHECKOUT that newline
         // matters (tokens on the directive's own line are fetched but not built), so keep it.
-        if key == "CHECKOUT" && full_section[*start..*value_start].split_once('=').is_some_and(|(_, ws)| ws.contains('\n')) {
+        if key == "CHECKOUT"
+            && full_section[*start..*value_start]
+                .split_once('=')
+                .is_some_and(|(_, ws)| ws.contains('\n'))
+        {
             value.insert(0, '\n');
         }
         map.insert(key.clone(), value);
@@ -642,13 +651,17 @@ fn build_section(
             .ok_or_else(|| anyhow!("Section for target '{target}' has unrecognized !TYPE '{t}'"))?,
     };
 
-    let url_orig = map
-        .get("URL")
-        .cloned()
-        .ok_or_else(|| anyhow!("Section for target '{target}' (type {type_str:?}) is missing the required !URL directive"))?;
+    let url_orig = map.get("URL").cloned().ok_or_else(|| {
+        anyhow!(
+            "Section for target '{target}' (type {type_str:?}) is missing the required !URL directive"
+        )
+    })?;
     let auth_url_orig = map.get("AUTH_URL").cloned();
     let commit = map.get("REPO_COMMIT").map(|c| parse_commit(c, &target, ty)).transpose()?;
-    let checksum = map.get("CHECKSUM_SHA256").map(|h| parse_checksum(h, &target, ty, checkout_val)).transpose()?;
+    let checksum = map
+        .get("CHECKSUM_SHA256")
+        .map(|h| parse_checksum(h, &target, ty, checkout_val))
+        .transpose()?;
 
     let inline = inline_checkouts(checkout_val);
     for token in checkout_val.split_whitespace() {
@@ -682,15 +695,22 @@ fn build_section(
 /// one, and nothing would honor it on any other type.
 fn parse_checksum(value: &str, target: &str, ty: ComponentType, checkout_val: &str) -> Res<String> {
     if !matches!(ty, ComponentType::Http | ComponentType::Https | ComponentType::Ftp) {
-        bail!("Section for target '{target}' has !CHECKSUM_SHA256, which only http, https and ftp components support");
+        bail!(
+            "Section for target '{target}' has !CHECKSUM_SHA256, which only http, https and ftp components support"
+        );
     }
     let n = checkout_val.split_whitespace().count();
     if n != 1 {
-        bail!("Section for target '{target}' has !CHECKSUM_SHA256 but checks out {n} files; a checksum names one");
+        bail!(
+            "Section for target '{target}' has !CHECKSUM_SHA256 but checks out {n} files; a checksum names one"
+        );
     }
     let hash = value.trim().to_ascii_lowercase();
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
-        bail!("Section for target '{target}' has !CHECKSUM_SHA256 '{}', which is not 64 hex digits", value.trim());
+        bail!(
+            "Section for target '{target}' has !CHECKSUM_SHA256 '{}', which is not 64 hex digits",
+            value.trim()
+        );
     }
     Ok(hash)
 }
@@ -830,7 +850,10 @@ impl Pin {
 
     /// The pin a parsed component already carries, if any.
     pub fn of(c: &Component) -> Option<Pin> {
-        c.commit.clone().map(Pin::Commit).or_else(|| c.checksum.clone().map(Pin::Sha256))
+        c.commit
+            .clone()
+            .map(Pin::Commit)
+            .or_else(|| c.checksum.clone().map(Pin::Sha256))
     }
 }
 
@@ -850,14 +873,18 @@ pub fn pin_text(text: &str, pins: &BTreeMap<String, Pin>) -> Res<String> {
     use anyhow::{bail, Context};
     let original = parse(text).context("The thornlist does not parse")?;
     for (repo, pin) in pins {
-        let of_repo: Vec<&Component> = original.components().iter().filter(|c| &c.repo == repo).collect();
+        let of_repo: Vec<&Component> =
+            original.components().iter().filter(|c| &c.repo == repo).collect();
         if of_repo.is_empty() {
             bail!("A pin names repo {repo}, which the thornlist does not");
         }
         if let Pin::Sha256(_) = pin
             && of_repo.len() != 1
         {
-            bail!("Repo {repo} has a checksum but the thornlist downloads {} files from it; a checksum names one", of_repo.len());
+            bail!(
+                "Repo {repo} has a checksum but the thornlist downloads {} files from it; a checksum names one",
+                of_repo.len()
+            );
         }
     }
     let target_re = regex::Regex::new(r"(?m)^!TARGET\s*=").expect("valid regex");
@@ -916,7 +943,12 @@ pub fn pin_text(text: &str, pins: &BTreeMap<String, Pin>) -> Res<String> {
         let kept = || original.components().iter().find(|o| o.repo == c.repo).and_then(Pin::of);
         let expected = pins.get(&c.repo).cloned().or_else(kept);
         if Pin::of(c) != expected {
-            bail!("Pinning left repo {} at {:?} instead of {:?} (a bug in pinning this list)", c.repo, Pin::of(c), expected);
+            bail!(
+                "Pinning left repo {} at {:?} instead of {:?} (a bug in pinning this list)",
+                c.repo,
+                Pin::of(c),
+                expected
+            );
         }
     }
     Ok(out)
@@ -934,8 +966,10 @@ type SplitCheckouts<'a> = Option<(&'a Vec<(String, bool)>, bool, bool)>;
 
 fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, pin: Option<&Pin>) -> String {
     let key_re = regex::Regex::new(r"(?m)^\s*!([^\s=]+)\s*=").expect("valid regex");
-    let keys: Vec<(String, usize)> =
-        key_re.captures_iter(section).map(|c| (c[1].to_owned(), c.get(0).expect("match").start())).collect();
+    let keys: Vec<(String, usize)> = key_re
+        .captures_iter(section)
+        .map(|c| (c[1].to_owned(), c.get(0).expect("match").start()))
+        .collect();
     let value_end = |i: usize| keys.get(i + 1).map_or(section.len(), |k| k.1);
     let mut out = String::new();
     let mut done = 0;
@@ -956,7 +990,8 @@ fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, pin: Option<&Pin>) 
                     Some((checkouts, first, last)) => {
                         // Each checkout stays where it was: on the !CHECKOUT line (fetched, not built,
                         // since Cactus's ThornList reader skips `!` lines) or on a line of its own.
-                        let inline: Vec<&str> = checkouts.iter().filter(|c| c.1).map(|c| c.0.as_str()).collect();
+                        let inline: Vec<&str> =
+                            checkouts.iter().filter(|c| c.1).map(|c| c.0.as_str()).collect();
                         if inline.is_empty() {
                             out.push_str("!CHECKOUT =\n");
                         } else {
@@ -966,8 +1001,10 @@ fn pin_section(section: &str, checkouts: SplitCheckouts<'_>, pin: Option<&Pin>) 
                             out.push_str(c);
                             out.push('\n');
                         }
-                        let lines: Vec<&str> = section[*start..value_end(i)].split_inclusive('\n').collect();
-                        let is_token = |l: &&str| !l.trim().is_empty() && !l.trim_start().starts_with('#');
+                        let lines: Vec<&str> =
+                            section[*start..value_end(i)].split_inclusive('\n').collect();
+                        let is_token =
+                            |l: &&str| !l.trim().is_empty() && !l.trim_start().starts_with('#');
                         // The `!CHECKOUT` line itself is always a token line
                         // here (or holds none, which changes nothing).
                         let last_token = lines.iter().rposition(is_token).unwrap_or(0);
@@ -1486,14 +1523,18 @@ CarpetX/Arith
             assert_eq!(c.branch.as_deref(), Some("mixed-precision/v1.4.0"));
         }
         // Unpinned stays unpinned.
-        let t = ok("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT = A/B\n");
+        let t = ok(
+            "!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT = A/B\n",
+        );
         assert_eq!(t.components()[0].commit, None);
     }
 
     #[test]
     fn repo_commit_must_be_a_full_id_on_a_git_component() {
         let section = |ty: &str, commit: &str| {
-            format!("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = {ty}\n!URL = https://x/r\n!REPO_COMMIT = {commit}\n!CHECKOUT = A/B\n")
+            format!(
+                "!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = {ty}\n!URL = https://x/r\n!REPO_COMMIT = {commit}\n!CHECKOUT = A/B\n"
+            )
         };
         let full = "0123456789abcdef0123456789abcdef01234567";
         assert!(err(&section("git", "0123abc")).contains("not a full commit id"));
@@ -1574,7 +1615,10 @@ CarpetX/Arith
         std::fs::write(dir.join("part.th"), "!TARGET = a\r\n!TYPE = git\r\n").unwrap();
         let text = "!CRL_VERSION = 1.0\n# keep me\n!INCLUDE = part.th\n#!INCLUDE = gone.th\n";
         let out = splice_includes(text, Some(&dir)).unwrap();
-        assert_eq!(out, "!CRL_VERSION = 1.0\n# keep me\n!TARGET = a\n!TYPE = git\n\n#!INCLUDE = gone.th\n");
+        assert_eq!(
+            out,
+            "!CRL_VERSION = 1.0\n# keep me\n!TARGET = a\n!TYPE = git\n\n#!INCLUDE = gone.th\n"
+        );
         assert!(splice_includes("!INCLUDE = https://x/y.th\n", Some(&dir)).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1726,7 +1770,6 @@ Numerical/PrivateThorn
         assert_eq!(new_t.thorn_providers()["WeylScal4"], "arrangements/SpacetimeX/WeylScal4");
     }
 
-
     /// `pin_text`: a one-repo section gains `!REPO_COMMIT` before its
     /// `!CHECKOUT` (or has its old one rewritten); a section spanning repos
     /// through `$2` in its URL is split per repo, keeping its `#DISABLED`
@@ -1741,12 +1784,15 @@ Numerical/PrivateThorn
                     !TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
                     !CHECKOUT =\n  ET/Alpha\n#DISABLED ET/Gamma\n  ET/Beta\n\n\
                     # untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n";
-        let pins: BTreeMap<String, Pin> =
-            [("flesh", &a), ("Alpha", &b), ("Beta", &c)].iter().map(|(r, p)| (r.to_string(), Pin::Commit(p.to_string()))).collect();
+        let pins: BTreeMap<String, Pin> = [("flesh", &a), ("Alpha", &b), ("Beta", &c)]
+            .iter()
+            .map(|(r, p)| (r.to_string(), Pin::Commit(p.to_string())))
+            .collect();
         let out = pin_text(text, &pins).unwrap();
 
         let list = parse(&out).unwrap();
-        let commit = |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().commit.clone();
+        let commit =
+            |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().commit.clone();
         assert_eq!(commit("flesh"), Some(a.clone()));
         assert_eq!(commit("Alpha"), Some(b.clone()));
         assert_eq!(commit("Beta"), Some(c.clone()));
@@ -1755,18 +1801,33 @@ Numerical/PrivateThorn
         assert!(!out.contains("0000000000"), "the old pin is rewritten, not doubled: {out}");
         assert!(out.starts_with("!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n# the flesh\n"), "{out}");
         assert!(out.ends_with("# untouched\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://x/other.git\n!CHECKOUT = O/One\n"), "{out}");
-        assert_eq!(out.matches("!URL = https://x/$2.git").count(), 2, "the $2 section is split per repo: {out}");
+        assert_eq!(
+            out.matches("!URL = https://x/$2.git").count(),
+            2,
+            "the $2 section is split per repo: {out}"
+        );
         // The split $2 section keeps its thorns on their own lines (built), as the author wrote them.
-        let generated = &out[out.find("!URL = https://x/$2.git").unwrap()..out.find("# untouched").unwrap()];
+        let generated =
+            &out[out.find("!URL = https://x/$2.git").unwrap()..out.find("# untouched").unwrap()];
         assert!(crate::crl_emit::tests::thorns_on_bang_lines(generated).is_empty(), "{out}");
         assert!(generated.contains("!CHECKOUT =\nET/Alpha\n"), "{out}");
         // A checkout-only thorn (on the !CHECKOUT line) stays fetch-only when its section is split.
         let et = "!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/$2.git\n!REPO_PATH = ../$2\n\
                   !CHECKOUT = E/PETSc\nE/Base\n";
-        let pins: BTreeMap<String, Pin> = [("PETSc".to_string(), Pin::Commit(a.clone()))].into_iter().collect();
+        let pins: BTreeMap<String, Pin> =
+            [("PETSc".to_string(), Pin::Commit(a.clone()))].into_iter().collect();
         let split = pin_text(et, &pins).unwrap();
-        let fetch_only: Vec<(String, bool)> = parse(&split).unwrap().components().iter().map(|c| (c.checkout.clone(), c.fetch_only)).collect();
-        assert_eq!(fetch_only, [("E/PETSc".to_string(), true), ("E/Base".to_string(), false)], "{split}");
+        let fetch_only: Vec<(String, bool)> = parse(&split)
+            .unwrap()
+            .components()
+            .iter()
+            .map(|c| (c.checkout.clone(), c.fetch_only))
+            .collect();
+        assert_eq!(
+            fetch_only,
+            [("E/PETSc".to_string(), true), ("E/Base".to_string(), false)],
+            "{split}"
+        );
 
         // No pins: nothing changes at all.
         assert_eq!(pin_text(text, &Default::default()).unwrap(), text);
@@ -1781,18 +1842,25 @@ Numerical/PrivateThorn
     fn checksum_pins_one_download() {
         let hash = "AB".repeat(32);
         let section = |ty: &str, hash: &str, checkout: &str| {
-            format!("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = {ty}\n!URL = https://x/dl\n!CHECKSUM_SHA256 = {hash}\n!CHECKOUT = {checkout}\n")
+            format!(
+                "!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = {ty}\n!URL = https://x/dl\n!CHECKSUM_SHA256 = {hash}\n!CHECKOUT = {checkout}\n"
+            )
         };
         let t = ok(&section("https", &hash, "lib.tar.gz"));
         assert_eq!(t.components()[0].checksum.as_deref(), Some(hash.to_ascii_lowercase().as_str()));
         assert_eq!(t.components()[0].commit, None);
         ok(&section("http", &hash, "lib.tar.gz"));
         assert!(err(&section("https", &hash[..63], "lib.tar.gz")).contains("not 64 hex digits"));
-        assert!(err(&section("https", &format!("{}g", &hash[..63]), "lib.tar.gz")).contains("not 64 hex digits"));
+        assert!(
+            err(&section("https", &format!("{}g", &hash[..63]), "lib.tar.gz"))
+                .contains("not 64 hex digits")
+        );
         assert!(err(&section("git", &hash, "A/B")).contains("only http, https and ftp"));
         assert!(err(&section("https", &hash, "a.tgz b.tgz")).contains("checks out 2 files"));
         // Unchecked stays unchecked.
-        let t = ok("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = https\n!URL = https://x/dl\n!CHECKOUT = lib.tar.gz\n");
+        let t = ok(
+            "!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = https\n!URL = https://x/dl\n!CHECKOUT = lib.tar.gz\n",
+        );
         assert_eq!(t.components()[0].checksum, None);
     }
 
@@ -1807,15 +1875,22 @@ Numerical/PrivateThorn
                     !CHECKOUT = zlib-1.3.tar.gz\n\n\
                     !TARGET = $ROOT/dl\n!TYPE = https\n!URL = https://x/$1\n!CHECKOUT = one/a.tgz two/b.tgz\n";
         let pins: BTreeMap<String, Pin> =
-            [("zlib".to_string(), Pin::Sha256(h.clone())), ("one".to_string(), Pin::Sha256(h.clone()))].into_iter().collect();
+            [("zlib".to_string(), Pin::Sha256(h.clone())), ("one".to_string(), Pin::Sha256(h.clone()))]
+                .into_iter()
+                .collect();
         let out = pin_text(text, &pins).unwrap();
         let list = parse(&out).unwrap();
-        let sum = |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().checksum.clone();
+        let sum =
+            |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().checksum.clone();
         assert_eq!(sum("zlib"), Some(h.clone()));
         assert_eq!(sum("one"), Some(h.clone()));
         assert_eq!(sum("two"), None);
         assert!(!out.contains("00000000"), "the old checksum is rewritten, not doubled: {out}");
-        assert_eq!(out.matches("!URL = https://x/$1").count(), 2, "the $1 section is split per repo: {out}");
+        assert_eq!(
+            out.matches("!URL = https://x/$1").count(),
+            2,
+            "the $1 section is split per repo: {out}"
+        );
 
         // A repo with several downloads cannot take one checksum.
         let several = "!CRL_VERSION = 1.0\n!TARGET = dl\n!TYPE = https\n!URL = https://x/files\n!CHECKOUT = a.tgz b.tgz\n";
@@ -1827,9 +1902,9 @@ Numerical/PrivateThorn
                       !REPO_COMMIT = 0123456789abcdef0123456789abcdef01234567\n!CHECKOUT =\nE/A\nE/B\n";
         let pins = [("A".to_string(), Pin::Commit("f".repeat(40)))].into_iter().collect();
         let list = parse(&pin_text(shared, &pins).unwrap()).unwrap();
-        let commit = |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().commit.clone();
+        let commit =
+            |repo: &str| list.components().iter().find(|c| c.repo == repo).unwrap().commit.clone();
         assert_eq!(commit("A"), Some("f".repeat(40)));
         assert_eq!(commit("B"), Some("0123456789abcdef0123456789abcdef01234567".to_string()));
     }
-
 }

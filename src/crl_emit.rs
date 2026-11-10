@@ -48,7 +48,12 @@ fn section_key(c: &Component) -> impl PartialEq + '_ {
 
 /// One CRL file: the header, `!DEFINE ROOT`, a section per run of alike components, then
 /// `#DISABLED` lines.
-pub fn emit(root: &str, components: &[Component], disabled: &[String], header_comment: Option<&str>) -> String {
+pub fn emit(
+    root: &str,
+    components: &[Component],
+    disabled: &[String],
+    header_comment: Option<&str>,
+) -> String {
     let mut out = String::new();
     if let Some(h) = header_comment {
         for line in h.lines() {
@@ -63,7 +68,10 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
         let first = &components[i];
         let mut j = i + 1;
         // A checksum names one file, so a checksummed download is a section of its own.
-        while j < components.len() && first.checksum.is_none() && section_key(&components[j]) == section_key(first) {
+        while j < components.len()
+            && first.checksum.is_none()
+            && section_key(&components[j]) == section_key(first)
+        {
             j += 1;
         }
         let d = |out: &mut String, k: &str, v: &Option<String>| {
@@ -83,7 +91,8 @@ pub fn emit(root: &str, components: &[Component], disabled: &[String], header_co
         d(&mut out, "CHECKSUM_SHA256", &first.checksum);
         d(&mut out, "NAME", &first.name);
         let group = &components[i..j];
-        let inline: Vec<&str> = group.iter().filter(|c| c.fetch_only).map(|c| c.checkout.as_str()).collect();
+        let inline: Vec<&str> =
+            group.iter().filter(|c| c.fetch_only).map(|c| c.checkout.as_str()).collect();
         if inline.is_empty() {
             out.push_str("!CHECKOUT   =\n");
         } else {
@@ -173,8 +182,19 @@ CarpetX/Arith
     /// Every thorn written on a `!` line, i.e. fetched but not built.
     pub(crate) fn thorns_on_bang_lines(text: &str) -> Vec<String> {
         text.lines()
-            .filter_map(|l| l.trim_start().strip_prefix("!CHECKOUT")?.trim_start().strip_prefix('=').map(str::to_owned))
-            .flat_map(|v| v.split_whitespace().filter(|t| t.contains('/')).map(str::to_owned).collect::<Vec<_>>())
+            .filter_map(|l| {
+                l.trim_start()
+                    .strip_prefix("!CHECKOUT")?
+                    .trim_start()
+                    .strip_prefix('=')
+                    .map(str::to_owned)
+            })
+            .flat_map(|v| {
+                v.split_whitespace()
+                    .filter(|t| t.contains('/'))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
 
@@ -210,10 +230,23 @@ CarpetX/Arith
         let src = "!CRL_VERSION = 1.0\n!TARGET = arrangements\n!TYPE = git\n!URL = https://x/ce.git\n!REPO_PATH = $2\n\
                    !CHECKOUT = CactusElliptic/EllPETSc CactusElliptic/TATPETSc\nCactusElliptic/EllBase\n#DISABLED CactusElliptic/EllPETSc\n";
         let a = parse(src).unwrap();
-        let only: Vec<(&str, bool)> = a.components().iter().map(|c| (c.checkout.as_str(), c.fetch_only)).collect();
-        assert_eq!(only, [("CactusElliptic/EllPETSc", true), ("CactusElliptic/TATPETSc", true), ("CactusElliptic/EllBase", false)]);
+        let only: Vec<(&str, bool)> =
+            a.components().iter().map(|c| (c.checkout.as_str(), c.fetch_only)).collect();
+        assert_eq!(
+            only,
+            [
+                ("CactusElliptic/EllPETSc", true),
+                ("CactusElliptic/TATPETSc", true),
+                ("CactusElliptic/EllBase", false)
+            ]
+        );
         let text = emit(a.root(), a.components(), a.disabled_thorns(), None);
-        assert!(text.contains("!CHECKOUT   = CactusElliptic/EllPETSc CactusElliptic/TATPETSc\nCactusElliptic/EllBase\n"), "{text}");
+        assert!(
+            text.contains(
+                "!CHECKOUT   = CactusElliptic/EllPETSc CactusElliptic/TATPETSc\nCactusElliptic/EllBase\n"
+            ),
+            "{text}"
+        );
         assert_eq!(parse(&text).unwrap().components(), a.components());
         // A directive written alone on its line with its checkouts below has none inline.
         let b = parse("!CRL_VERSION = 1.0\n!TARGET = a\n!TYPE = git\n!URL = https://x/r.git\n!CHECKOUT =\nA/Built\n").unwrap();

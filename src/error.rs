@@ -13,7 +13,9 @@ pub enum Error {
     },
 
     /// The file declares a format generation newer than this reader understands.
-    #[error("{what} uses format {found}, but this version only understands format {supported}; upgrade to read it")]
+    #[error(
+        "{what} uses format {found}, but this version only understands format {supported}; upgrade to read it"
+    )]
     NewerFormat { what: &'static str, found: u32, supported: u32 },
 
     /// The file has no usable top-level `format` key.

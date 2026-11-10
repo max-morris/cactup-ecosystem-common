@@ -142,12 +142,25 @@ fn contact_must_be_a_url_or_mailto() {
     use cactup_ecosystem_common::manifest::validate_contact;
     validate_contact("https://trac.einsteintoolkit.org/").unwrap();
     validate_contact("mailto:users@einsteintoolkit.org").unwrap();
-    for bad in ["http://x.org", "https://", "mailto:nobody", "javascript:alert(1)", "https://a b", "issues"] {
+    for bad in
+        ["http://x.org", "https://", "mailto:nobody", "javascript:alert(1)", "https://a b", "issues"]
+    {
         assert!(validate_contact(bad).is_err(), "{bad}");
     }
-    let m = PACKAGE.replace("license = \"LGPL-2.1-or-later\"", "license = \"LGPL-2.1-or-later\"\ncontact = \"https://trac.einsteintoolkit.org/\"");
-    assert_eq!(Manifest::from_toml(&m).unwrap().package.unwrap().contact.as_deref(), Some("https://trac.einsteintoolkit.org/"));
-    assert!(Manifest::from_toml(&PACKAGE.replace("license = \"LGPL-2.1-or-later\"", "contact = \"javascript:x\"")).is_err());
+    let m = PACKAGE.replace(
+        "license = \"LGPL-2.1-or-later\"",
+        "license = \"LGPL-2.1-or-later\"\ncontact = \"https://trac.einsteintoolkit.org/\"",
+    );
+    assert_eq!(
+        Manifest::from_toml(&m).unwrap().package.unwrap().contact.as_deref(),
+        Some("https://trac.einsteintoolkit.org/")
+    );
+    assert!(
+        Manifest::from_toml(
+            &PACKAGE.replace("license = \"LGPL-2.1-or-later\"", "contact = \"javascript:x\"")
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -155,7 +168,8 @@ fn manifest_validation() {
     let neither = "format = 1\n";
     assert!(invalid(neither).contains("[package] or a [stack]"));
 
-    let versioned_target = PACKAGE.replace("target = \"max-morris/carpetx-mp\"", "target = \"max-morris/carpetx-mp@1.0.0\"");
+    let versioned_target = PACKAGE
+        .replace("target = \"max-morris/carpetx-mp\"", "target = \"max-morris/carpetx-mp@1.0.0\"");
     assert!(invalid(&versioned_target).contains("just owner/name"));
 
     let no_owners = "format = 1\n[package]\nname = \"x\"\nowners = []\n";
@@ -208,7 +222,55 @@ commit = "3f2c9e1a00112233445566778899aabbccddeeff"
     assert_eq!(s.pins.len(), 1);
 
     let unpinned = text.replace("commit = \"3f2c9e1a00112233445566778899aabbccddeeff\"\n", "");
-    assert!(invalid(&unpinned).contains("needs a commit or sha256"));
+    assert!(invalid(&unpinned).contains("needs exactly one of commit, sha256 or tag"));
+}
+
+/// `pin-tag` pins every repo that has the tag; a repo's own pin, by tag or commit, wins over it.
+#[test]
+fn pin_tag_and_pins_by_tag() {
+    let text = r#"
+format = 1
+
+[stack]
+name = "et-stack"
+thornlist = "einsteintoolkit.th"
+pin-tag = "ET_2026_05_v0"
+
+[[stack.pin]]
+name = "CarpetX"
+tag = "ET_2026_05_v1"
+
+[[stack.pin]]
+name = "Cottonmouth"
+commit = "7b3a6b19bb6278d7ae9205bce817042c253a9591"
+"#;
+    let s = Manifest::from_toml(text).unwrap().stack.unwrap();
+    assert_eq!(s.pin_tag.as_deref(), Some("ET_2026_05_v0"));
+    assert_eq!(s.pins[0].tag.as_deref(), Some("ET_2026_05_v1"));
+    assert_eq!(s.pins[1].commit.as_deref(), Some("7b3a6b19bb6278d7ae9205bce817042c253a9591"));
+    let back =
+        Manifest::from_toml(&toml::to_string(&Manifest::from_toml(text).unwrap()).unwrap()).unwrap();
+    assert_eq!(back.stack.unwrap(), s);
+
+    let both = text.replace(
+        "tag = \"ET_2026_05_v1\"",
+        "tag = \"ET_2026_05_v1\"\ncommit = \"7b3a6b19bb6278d7ae9205bce817042c253a9591\"",
+    );
+    assert!(invalid(&both).contains("exactly one of commit, sha256 or tag"));
+    let twice = text.replace("name = \"Cottonmouth\"", "name = \"CarpetX\"");
+    assert!(invalid(&twice).contains("pinned twice"));
+    assert!(
+        invalid(&text.replace("pin-tag = \"ET_2026_05_v0\"", "pin-tag = \"ET 2026\""))
+            .contains("not a valid tag name")
+    );
+    assert!(
+        invalid(&text.replace("tag = \"ET_2026_05_v1\"", "tag = \"a..b\""))
+            .contains("not a valid tag name")
+    );
+    assert!(
+        invalid(&text.replace("7b3a6b19bb6278d7ae9205bce817042c253a9591", "7b3a6b1"))
+            .contains("not a full commit id")
+    );
 }
 
 #[test]

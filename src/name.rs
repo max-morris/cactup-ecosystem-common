@@ -24,7 +24,10 @@ fn validate(kind: &str, s: &str) -> Result<()> {
     if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
         return bad("it must start with a lowercase letter or digit");
     }
-    if let Some(c) = s.chars().find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(*c))) {
+    if let Some(c) = s
+        .chars()
+        .find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(*c)))
+    {
         return bad(&format!("'{c}' is not allowed (use lowercase letters, digits, '.', '_' or '-')"));
     }
     if s.ends_with('.') || s.ends_with('-') {
