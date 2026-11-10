@@ -157,7 +157,7 @@ impl Manifest {
     }
 
     pub fn from_toml(text: &str) -> Result<Manifest> {
-        generation::check(text, "cactarium.toml", MANIFEST_FORMAT)?;
+        generation::check(text, "cactarium.toml", MANIFEST_FORMAT, MANIFEST_FORMAT)?;
         let m: Manifest = toml::from_str(text).map_err(|source| Error::Toml { what: "cactarium.toml", source })?;
         m.validate()?;
         Ok(m)

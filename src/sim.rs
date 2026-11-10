@@ -98,8 +98,125 @@ pub struct Input {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Of the file at `url` (the archive itself, when `unpack`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The download is an archive ([`ArchiveKind`], by the URL's extension) to unpack; the knob
+    /// gets `path` inside the unpacked tree, else the tree itself. Needs `url` and `sha256`: an
+    /// archive is never unpacked unverified. Format 2.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unpack: bool,
+    /// The file (or directory) in the unpacked tree the knob points at, relative to its root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Text edits applied once, in order, after unpacking.
+    #[serde(default, rename = "fixup", skip_serializing_if = "Vec::is_empty")]
+    pub fixups: Vec<Fixup>,
+}
+
+/// One edit to a file of an unpacked archive: every occurrence of the literal `replace` becomes
+/// `with`, in which `{dir}` stands for the absolute directory the archive was unpacked into (the
+/// only placeholder). `replace` must occur at least once; only the archive can tell, so that is
+/// checked when the edit is applied.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Fixup {
+    /// Relative to the unpacked tree's root.
+    pub file: String,
+    pub replace: String,
+    pub with: String,
+}
+
+impl Fixup {
+    /// `with`, its `{dir}` resolved against `dir`.
+    pub fn replacement(&self, dir: &str) -> String {
+        self.with.replace("{dir}", dir)
+    }
+}
+
+/// The archive formats an `unpack` input may use, told apart by the URL's extension.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArchiveKind {
+    Tar,
+    TarGz,
+    TarXz,
+    Zip,
+}
+
+impl ArchiveKind {
+    /// The kind `url`'s path ends in (a query or fragment is ignored), if any.
+    pub fn of_url(url: &str) -> Option<ArchiveKind> {
+        let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+        if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
+            Some(ArchiveKind::TarGz)
+        } else if path.ends_with(".tar.xz") || path.ends_with(".txz") {
+            Some(ArchiveKind::TarXz)
+        } else if path.ends_with(".tar") {
+            Some(ArchiveKind::Tar)
+        } else if path.ends_with(".zip") {
+            Some(ArchiveKind::Zip)
+        } else {
+            None
+        }
+    }
+}
+
+/// A path inside an unpacked archive: relative, `/`-separated, with no empty, `.` or `..`
+/// component and no backslash, so it can never leave the tree.
+pub fn validate_member_path(what: &str, p: &str) -> Result<()> {
+    if p.is_empty() || p.starts_with('/') || p.contains('\\') || p.split('/').any(|c| c.is_empty() || c == "." || c == "..")
+    {
+        return Err(Error::invalid(format!(
+            "{what} '{p}' must be a relative path inside the archive (no leading '/', no '.' or '..', no backslashes)"
+        )));
+    }
+    Ok(())
+}
+
+impl Input {
+    /// The checks that need only the input itself.
+    fn validate(&self) -> Result<()> {
+        let knob = &self.knob;
+        if let Some(h) = &self.sha256
+            && !is_hex(h, &[64])
+        {
+            return Err(Error::invalid(format!("input '{knob}': '{h}' is not a sha256")));
+        }
+        if !self.unpack {
+            if self.path.is_some() || !self.fixups.is_empty() {
+                return Err(Error::invalid(format!("input '{knob}': 'path' and fixups need unpack = true")));
+            }
+            return Ok(());
+        }
+        let Some(url) = &self.url else {
+            return Err(Error::invalid(format!("input '{knob}': unpack needs a url")));
+        };
+        if self.sha256.is_none() {
+            return Err(Error::invalid(format!("input '{knob}': unpack needs the archive's sha256")));
+        }
+        if ArchiveKind::of_url(url).is_none() {
+            return Err(Error::invalid(format!(
+                "input '{knob}': '{url}' is not an archive cactup can unpack (.tar, .tar.gz, .tgz, .tar.xz, .zip)"
+            )));
+        }
+        if let Some(p) = &self.path {
+            validate_member_path(&format!("input '{knob}': path"), p)?;
+        }
+        for f in &self.fixups {
+            validate_member_path(&format!("input '{knob}': fixup file"), &f.file)?;
+            if f.replace.is_empty() {
+                return Err(Error::invalid(format!("input '{knob}': a fixup of '{}' replaces nothing", f.file)));
+            }
+            let rest = f.with.replace("{dir}", "");
+            if rest.contains('{') || rest.contains('}') {
+                return Err(Error::invalid(format!(
+                    "input '{knob}': fixup of '{}': '{{dir}}' is the only placeholder 'with' may use",
+                    f.file
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One source repo (not one CRL section: a section with `$1`/`$2` in its URL spans many repos).
@@ -236,22 +353,38 @@ fn plain_filename(what: &str, f: &str) -> Result<()> {
 }
 
 impl SimFile {
+    /// Any generation from 1 to [`SIM_FORMAT`]; one newer is refused with an upgrade message.
     pub fn from_toml(text: &str) -> Result<SimFile> {
-        generation::check(text, "the .sim file", SIM_FORMAT)?;
+        generation::check(text, "the .sim file", 1, SIM_FORMAT)?;
         let sim: SimFile = toml::from_str(text).map_err(|source| Error::Toml { what: "the .sim file", source })?;
         sim.validate()?;
         Ok(sim)
     }
 
+    /// Written as the oldest generation that holds this content ([`Self::required_format`]),
+    /// whatever `format` says, so readers older than a feature the file does not use still read it.
     pub fn to_toml(&self) -> Result<String> {
         self.validate()?;
-        toml::to_string(self).map_err(|source| Error::Serialize { what: "the .sim file", source })
+        let file = SimFile { format: self.required_format(), ..self.clone() };
+        toml::to_string(&file).map_err(|source| Error::Serialize { what: "the .sim file", source })
+    }
+
+    /// The oldest generation that can hold this file: 2 when an input unpacks an archive, else 1.
+    pub fn required_format(&self) -> u32 {
+        if self.inputs.iter().any(|i| i.unpack) { 2 } else { 1 }
     }
 
     /// Structural checks that hold for every `.sim`, pinned or not.
     pub fn validate(&self) -> Result<()> {
-        if self.format != SIM_FORMAT {
-            return Err(Error::invalid(format!("format must be {SIM_FORMAT}")));
+        if !(1..=SIM_FORMAT).contains(&self.format) {
+            return Err(Error::invalid(format!("format must be 1 to {SIM_FORMAT}")));
+        }
+        if self.format < self.required_format() {
+            return Err(Error::invalid(format!(
+                "format {} cannot hold archive inputs (unpack); they need format {}",
+                self.format,
+                self.required_format()
+            )));
         }
         if self.sim.name.trim().is_empty() {
             return Err(Error::invalid("[sim] name is empty"));
@@ -277,11 +410,7 @@ impl SimFile {
             if !knobs.insert(i.knob.as_str()) {
                 return Err(Error::invalid(format!("input '{}' is declared twice", i.knob)));
             }
-            if let Some(h) = &i.sha256
-                && !is_hex(h, &[64])
-            {
-                return Err(Error::invalid(format!("input '{}': '{h}' is not a sha256", i.knob)));
-            }
+            i.validate()?;
         }
         // `base` may be `owner/stack@head` or `@master`: the [[repo]] pins, not the base, make a .sim reproducible.
         if let Some(p) = &self.provenance

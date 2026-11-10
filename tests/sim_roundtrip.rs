@@ -1,5 +1,7 @@
 use cactup_ecosystem_common::Error;
-use cactup_ecosystem_common::sim::{ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified};
+use cactup_ecosystem_common::sim::{
+    ArchiveKind, Fixup, Input, ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified,
+};
 
 const SHA: &str = "3f2c9e1a00112233445566778899aabbccddeeff";
 
@@ -126,10 +128,84 @@ fn unknown_keys_are_rejected() {
 
 #[test]
 fn newer_format_asks_for_an_upgrade() {
-    let out = sample("x\n", "y\n").to_toml().unwrap().replacen("format = 1", "format = 2", 1);
+    let out = sample("x\n", "y\n").to_toml().unwrap().replacen("format = 1", "format = 3", 1);
     let err = SimFile::from_toml(&out).unwrap_err();
-    assert!(matches!(err, Error::NewerFormat { found: 2, supported: 1, .. }), "{err}");
+    assert!(matches!(err, Error::NewerFormat { found: 3, supported: 2, .. }), "{err}");
     assert!(err.to_string().contains("upgrade"));
+}
+
+/// The pretty-bhns case: a gallery tarball unpacked, the knob pointing at its `.info` file, and
+/// one placeholder path in it rewritten against the unpack directory.
+fn archive_input() -> Input {
+    Input {
+        knob: "kadath-initial-data".into(),
+        description: Some("FUKA initial data".into()),
+        url: Some("https://einsteintoolkit.org/gallery/bhns/bhns_gw230529_ID.tar.gz".into()),
+        sha256: Some("ab".repeat(32)),
+        unpack: true,
+        path: Some("bhns_gw230529_ID/X.info".into()),
+        fixups: vec![Fixup {
+            file: "bhns_gw230529_ID/X.info".into(),
+            replace: "/path/to/gam2.polytrope".into(),
+            with: "{dir}/bhns_gw230529_ID/gam2.polytrope".into(),
+        }],
+    }
+}
+
+/// A file is written as the oldest format that holds it: 1 without archive inputs (readable by
+/// every older reader), 2 with one; both read back, and a format-1 file claiming one is refused.
+#[test]
+fn archive_inputs_need_format_2_and_nothing_else_does() {
+    let plain = sample("x\n", "y\n");
+    assert!(plain.to_toml().unwrap().starts_with("format = 1\n"));
+    let mut sim = sample("x\n", "y\n");
+    sim.format = 2;
+    assert!(sim.to_toml().unwrap().starts_with("format = 1\n"), "nothing needs 2, so 1 is written");
+
+    sim.inputs.push(archive_input());
+    let text = sim.to_toml().unwrap();
+    assert!(text.starts_with("format = 2\n"), "{text}");
+    assert!(text.contains("[[input.fixup]]"), "{text}");
+    let back = SimFile::from_toml(&text).unwrap();
+    assert_eq!(back.inputs, sim.inputs);
+    assert_eq!(back.format, 2);
+
+    let claims_1 = text.replacen("format = 2", "format = 1", 1);
+    let err = SimFile::from_toml(&claims_1).unwrap_err().to_string();
+    assert!(err.contains("need format 2"), "{err}");
+}
+
+#[test]
+fn archive_inputs_are_validated() {
+    let check = |edit: &dyn Fn(&mut Input)| {
+        let mut sim = sample("x\n", "y\n");
+        let mut input = archive_input();
+        edit(&mut input);
+        sim.inputs.push(input);
+        sim.format = 2;
+        sim.validate().map_err(|e| e.to_string())
+    };
+    check(&|_| {}).unwrap();
+    // Without path the knob gets the unpack directory itself.
+    check(&|i| i.path = None).unwrap();
+    for (what, edit, expect) in [
+        ("no sha256", Box::new(|i: &mut Input| i.sha256 = None) as Box<dyn Fn(&mut Input)>, "sha256"),
+        ("no url", Box::new(|i: &mut Input| i.url = None), "url"),
+        ("not an archive", Box::new(|i: &mut Input| i.url = Some("https://x/data.h5".into())), "not an archive"),
+        ("absolute path", Box::new(|i: &mut Input| i.path = Some("/etc/passwd".into())), "relative path"),
+        ("dotdot path", Box::new(|i: &mut Input| i.path = Some("a/../../b".into())), "relative path"),
+        ("backslash", Box::new(|i: &mut Input| i.fixups[0].file = "a\\b".into()), "relative path"),
+        ("empty replace", Box::new(|i: &mut Input| i.fixups[0].replace.clear()), "replaces nothing"),
+        ("other placeholder", Box::new(|i: &mut Input| i.fixups[0].with = "{home}/x".into()), "only placeholder"),
+        ("path without unpack", Box::new(|i: &mut Input| i.unpack = false), "need unpack"),
+    ] {
+        let err = check(&*edit).expect_err(what);
+        assert!(err.contains(expect), "{what}: {err}");
+    }
+    for url in ["https://x/a.tar", "https://x/a.TGZ", "https://x/a.tar.xz?dl=1", "https://x/a.zip#frag"] {
+        assert!(ArchiveKind::of_url(url).is_some(), "{url}");
+    }
+    assert_eq!(archive_input().fixups[0].replacement("/work/in"), "/work/in/bhns_gw230529_ID/gam2.polytrope");
 }
 
 #[test]

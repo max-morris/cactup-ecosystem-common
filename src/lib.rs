@@ -35,7 +35,10 @@ mod generation;
 
 pub use error::{Error, Result};
 
-/// The `.sim` format generation this crate reads and writes.
-pub const SIM_FORMAT: u32 = 1;
+/// The newest `.sim` format generation this crate reads and writes. It reads every generation
+/// back to 1, and writes the oldest one that can hold a file's content
+/// ([`sim::SimFile::required_format`]), so a file that needs nothing new stays readable by
+/// older readers. Generation 2 added archive inputs (`unpack`, `path`, `[[input.fixup]]`).
+pub const SIM_FORMAT: u32 = 2;
 /// The `cactarium.toml` format generation this crate reads and writes.
 pub const MANIFEST_FORMAT: u32 = 1;
