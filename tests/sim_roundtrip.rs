@@ -177,18 +177,14 @@ fn structural_errors() {
     assert!(sim.to_toml().is_err(), "path in filename");
 }
 
-/// Round-trips Max's real pretty-bhns thornlist and parfile when they are present.
+/// Round-trips a real thornlist and parfile, verbatim, when CACTUP_TEST_THORNLIST and
+/// CACTUP_TEST_PARFILE name them.
 #[test]
-fn real_pretty_bhns_files_round_trip() {
-    let Some(home) = std::env::var_os("HOME") else { return };
-    let dir = std::path::Path::new(&home).join("src/pretty-bhns/parfiles");
-    let (Ok(th), Ok(par)) = (
-        std::fs::read_to_string(dir.join("bhns.th")),
-        std::fs::read_to_string(dir.join("bhns_gw230529_dense_output.par")),
-    ) else {
-        eprintln!("skipping: pretty-bhns not found");
+fn real_files_round_trip() {
+    let (Some(th), Some(par)) = (std::env::var_os("CACTUP_TEST_THORNLIST"), std::env::var_os("CACTUP_TEST_PARFILE")) else {
         return;
     };
+    let (Ok(th), Ok(par)) = (std::fs::read_to_string(th), std::fs::read_to_string(par)) else { return };
     let sim = sample(&th, &par);
     let back = SimFile::from_toml(&sim.to_toml().unwrap()).unwrap();
     assert_eq!(back.thornlist.text, th);

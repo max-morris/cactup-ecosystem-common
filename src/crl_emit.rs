@@ -159,15 +159,14 @@ CarpetX/Arith
             .collect()
     }
 
-    /// Max's real ET-with-forks list survives emit and pin_text with every checkout in place.
+    /// A real, full Einstein Toolkit list survives emit and pin_text with every checkout in place.
+    /// Runs when CACTUP_TEST_ET_THORNLIST names one (e.g. the ET's einsteintoolkit.th).
     #[test]
-    fn the_real_et_list_round_trips() {
-        let Some(home) = std::env::var_os("HOME") else { return };
-        let Ok(src) = std::fs::read_to_string(std::path::Path::new(&home).join("Cactus-2026/thornlists/carpetx-mp-forks.th")) else {
-            return;
-        };
+    fn a_real_et_list_round_trips() {
+        let Some(path) = std::env::var_os("CACTUP_TEST_ET_THORNLIST") else { return };
+        let Ok(src) = std::fs::read_to_string(path) else { return };
         let a = parse(&src).unwrap();
-        assert!(a.components().iter().any(|c| c.fetch_only && c.checkout == "CactusElliptic/EllPETSc"));
+        assert!(a.components().iter().any(|c| c.fetch_only), "an ET list has checkout-only thorns");
         let text = emit(a.root(), a.components(), a.disabled_thorns(), None);
         assert_eq!(parse(&text).unwrap().components(), a.components());
         let pins: std::collections::BTreeMap<String, String> =

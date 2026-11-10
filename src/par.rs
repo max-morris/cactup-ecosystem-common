@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(refs.env, [Reference { name: "HOME".into(), optional: false }]);
     }
 
-    /// The pretty-bhns case: `@KNOB(name)@` written in comments to document
+    /// A real parfile's case: `@KNOB(name)@` written in comments to document
     /// the syntax is no use of a knob called `name`.
     #[test]
     fn documentation_in_comments_is_not_a_use() {

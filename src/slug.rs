@@ -161,7 +161,7 @@ mod tests {
         assert!(s.req().unwrap().matches(&"mixed-precision:1.5.0".parse().unwrap()));
         assert_eq!(s.to_string(), "max-morris/carpetx/TestReal4@mixed-precision:^1.4");
 
-        let sim: Slug = "mmorris/qc0-bbh@3".parse().unwrap();
+        let sim: Slug = "someone/qc0-bbh@3".parse().unwrap();
         assert_eq!(sim.number().unwrap(), Some(3));
 
         let exact: Slug = "max-morris/carpetx@mixed-precision:1.4.0".parse().unwrap();
