@@ -319,8 +319,12 @@ arrangement = "ExternalLibraries"
 thorns = ["HDF5"]
 tag-pattern = "ET_{major}_{minor}_v{patch}"
 since = "2026.5.0"
+repo-path = "../$1-$2"
 "#;
     let m = Manifest::from_toml(pkg).unwrap();
+    assert_eq!(m.package.as_ref().unwrap().repo_path.as_deref(), Some("../$1-$2"));
+    assert!(invalid(&pkg.replace("../$1-$2", "/abs/path")).contains("repo-path"));
+    assert!(invalid(&pkg.replace("../$1-$2", "a b")).contains("repo-path"));
     let p = m.package.as_ref().unwrap();
     assert_eq!(p.tag_pattern.as_deref(), Some("ET_{major}_{minor}_v{patch}"));
     assert_eq!(p.since, Some(semver::Version::new(2026, 5, 0)));
