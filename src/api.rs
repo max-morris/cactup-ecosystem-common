@@ -32,6 +32,8 @@ pub const API_GENERATION_HEADER: &str = "api-generation";
 pub const SHA256_HEADER: &str = "x-sha256";
 /// Set (to `true`) on a stack response that is not a release: `@head` or `@master`.
 pub const UNPINNED_HEADER: &str = "x-cactarium-unpinned";
+/// On a stack response: where to go for help with the stack (its declared contact, else its repo).
+pub const CONTACT_HEADER: &str = "x-cactarium-contact";
 /// The path prefix of every endpoint.
 pub const API_PREFIX: &str = "/api/v1";
 
