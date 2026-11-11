@@ -365,3 +365,20 @@ tag-pattern = "run-{major}.{minor}.{patch}"
     let both = format!("{text}\n[package]\nname = \"x\"\nowners = [\"y\"]\n");
     assert!(invalid(&both).contains("one of [package], [stack] or [sim]"));
 }
+
+/// `owner/pkg@<full commit id>` names a commit; abbreviations and hex-looking tracks don't.
+#[test]
+fn slugs_name_commits() {
+    use cactup_ecosystem_common::slug::Slug;
+    let sha = "7b3a6b19bb6278d7ae9205bce817042c253a9591";
+    let s: Slug = format!("et/cottonmouth@{sha}").parse().unwrap();
+    assert_eq!(s.commit(), Some(sha));
+    assert!(s.req().unwrap_err().to_string().contains("names a commit"));
+    let thorn: Slug = format!("et/cottonmouth/CottonmouthZ4c4m@{sha}").parse().unwrap();
+    assert_eq!(thorn.commit(), Some(sha));
+    for not in ["et/cottonmouth@7b3a6b1", "et/cottonmouth@1.2.3", "et/cottonmouth@head", "et/cottonmouth@deadbeef"] {
+        assert_eq!(not.parse::<Slug>().unwrap().commit(), None, "{not}");
+    }
+    let upper: Slug = format!("et/cottonmouth@{}", sha.to_uppercase()).parse().unwrap();
+    assert_eq!(upper.commit(), None);
+}

@@ -1,8 +1,8 @@
 //! References users type: `owner/name`, `owner/name/Thorn`, `owner/name@...`.
 //!
 //! What follows `@` depends on the entry kind, so a [`Slug`] keeps it raw and offers typed
-//! readers: a range for packages and stacks ([`Slug::req`]), an exact version ([`Slug::exact`]),
-//! or a sim upload number ([`Slug::number`]).
+//! readers: a range ([`Slug::req`]), an exact version ([`Slug::exact`]), a branch tip
+//! ([`Slug::tip`]), or a package's commit ([`Slug::commit`]).
 
 use std::fmt;
 use std::str::FromStr;
@@ -62,12 +62,21 @@ impl Slug {
         }
     }
 
+    /// `@<full commit id>` (40 or 64 hex digits): a package at one commit, whether or not a
+    /// version names it. Abbreviated ids are not accepted: a registry can't resolve one against a
+    /// remote without fetching its history, and short hex strings read as track names or versions.
+    pub fn commit(&self) -> Option<&str> {
+        self.at.as_deref().filter(|at| is_commit_id(at))
+    }
+
     /// The `@` part as a version range (`^1.2`, `mixed-precision:^1`). No `@` means any version on
-    /// the default track. `@head` and `@master` are not ranges: check [`Slug::tip`] first.
+    /// the default track. `@head`, `@master` and `@<commit>` are not ranges: check
+    /// [`Slug::tip`] and [`Slug::commit`] first.
     pub fn req(&self) -> Result<TrackedReq> {
         match &self.at {
             None => Ok(TrackedReq { track: None, req: semver::VersionReq::STAR }),
             Some(at) if at == HEAD || at == MASTER => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
+            Some(at) if is_commit_id(at) => Err(Error::invalid(format!("'{self}' names a commit, not a version"))),
             Some(at) => at.parse(),
         }
     }
@@ -95,6 +104,11 @@ impl Slug {
     pub fn entry(&self) -> String {
         format!("{}/{}", self.owner, self.name)
     }
+}
+
+/// A full commit id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
+pub fn is_commit_id(s: &str) -> bool {
+    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 impl FromStr for Slug {
