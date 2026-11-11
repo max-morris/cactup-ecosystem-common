@@ -112,6 +112,11 @@ pub struct Input {
     /// Text edits applied once, in order, after unpacking.
     #[serde(default, rename = "fixup", skip_serializing_if = "Vec::is_empty")]
     pub fixups: Vec<Fixup>,
+    /// A file in the sim's own repository, at the version's commit, instead of `url` (the commit
+    /// pins its content, so there is no `sha256`). Only a sim published from its repository can
+    /// have one (`cactarium-sim.toml`). Unpacked like a download when `unpack`. Format 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_file: Option<String>,
 }
 
 /// One edit to a file of an unpacked archive: every occurrence of the literal `replace` becomes
@@ -182,21 +187,33 @@ impl Input {
         {
             return Err(Error::invalid(format!("input '{knob}': '{h}' is not a sha256")));
         }
+        if let Some(file) = &self.repo_file {
+            if self.url.is_some() || self.sha256.is_some() {
+                return Err(Error::invalid(format!(
+                    "input '{knob}': repo-file takes the place of url and sha256 (the commit pins it)"
+                )));
+            }
+            validate_member_path(&format!("input '{knob}': repo-file"), file)?;
+        }
         if !self.unpack {
             if self.path.is_some() || !self.fixups.is_empty() {
                 return Err(Error::invalid(format!("input '{knob}': 'path' and fixups need unpack = true")));
             }
             return Ok(());
         }
-        let Some(url) = &self.url else {
-            return Err(Error::invalid(format!("input '{knob}': unpack needs a url")));
+        let source = match (&self.repo_file, &self.url) {
+            (Some(file), _) => file,
+            (None, Some(url)) => {
+                if self.sha256.is_none() {
+                    return Err(Error::invalid(format!("input '{knob}': unpack needs the archive's sha256")));
+                }
+                url
+            }
+            (None, None) => return Err(Error::invalid(format!("input '{knob}': unpack needs a url or a repo-file"))),
         };
-        if self.sha256.is_none() {
-            return Err(Error::invalid(format!("input '{knob}': unpack needs the archive's sha256")));
-        }
-        if ArchiveKind::of_url(url).is_none() {
+        if ArchiveKind::of_url(source).is_none() {
             return Err(Error::invalid(format!(
-                "input '{knob}': '{url}' is not an archive cactup can unpack (.tar, .tar.gz, .tgz, .tar.xz, .zip)"
+                "input '{knob}': '{source}' is not an archive cactup can unpack (.tar, .tar.gz, .tgz, .tar.xz, .zip)"
             )));
         }
         if let Some(p) = &self.path {
@@ -369,9 +386,16 @@ impl SimFile {
         toml::to_string(&file).map_err(|source| Error::Serialize { what: "the .sim file", source })
     }
 
-    /// The oldest generation that can hold this file: 2 when an input unpacks an archive, else 1.
+    /// The oldest generation that can hold this file: 3 when an input is a file of the sim's own
+    /// repository, 2 when an input unpacks an archive, else 1.
     pub fn required_format(&self) -> u32 {
-        if self.inputs.iter().any(|i| i.unpack) { 2 } else { 1 }
+        if self.inputs.iter().any(|i| i.repo_file.is_some()) {
+            3
+        } else if self.inputs.iter().any(|i| i.unpack) {
+            2
+        } else {
+            1
+        }
     }
 
     /// Structural checks that hold for every `.sim`, pinned or not.
@@ -381,7 +405,8 @@ impl SimFile {
         }
         if self.format < self.required_format() {
             return Err(Error::invalid(format!(
-                "format {} cannot hold archive inputs (unpack); they need format {}",
+                "format {} cannot hold this file's inputs (archive inputs need format 2, repo-file inputs 3); \
+                 it needs format {}",
                 self.format,
                 self.required_format()
             )));

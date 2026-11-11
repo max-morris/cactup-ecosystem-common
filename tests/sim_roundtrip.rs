@@ -128,9 +128,9 @@ fn unknown_keys_are_rejected() {
 
 #[test]
 fn newer_format_asks_for_an_upgrade() {
-    let out = sample("x\n", "y\n").to_toml().unwrap().replacen("format = 1", "format = 3", 1);
+    let out = sample("x\n", "y\n").to_toml().unwrap().replacen("format = 1", "format = 4", 1);
     let err = SimFile::from_toml(&out).unwrap_err();
-    assert!(matches!(err, Error::NewerFormat { found: 3, supported: 2, .. }), "{err}");
+    assert!(matches!(err, Error::NewerFormat { found: 4, supported: 3, .. }), "{err}");
     assert!(err.to_string().contains("upgrade"));
 }
 
@@ -149,6 +149,7 @@ fn archive_input() -> Input {
             replace: "/path/to/gam2.polytrope".into(),
             with: "{dir}/bhns_gw230529_ID/gam2.polytrope".into(),
         }],
+        repo_file: None,
     }
 }
 
@@ -172,7 +173,42 @@ fn archive_inputs_need_format_2_and_nothing_else_does() {
 
     let claims_1 = text.replacen("format = 2", "format = 1", 1);
     let err = SimFile::from_toml(&claims_1).unwrap_err().to_string();
-    assert!(err.contains("need format 2"), "{err}");
+    assert!(err.contains("needs format 2"), "{err}");
+}
+
+/// A repo-file input (a file of the sim's own repository at the version's commit) takes the
+/// place of url and sha256, follows the member-path rules, unpacks like a download, and needs
+/// format 3, written only when one is there.
+#[test]
+fn repo_file_inputs_need_format_3() {
+    let repo_input = Input {
+        url: None,
+        sha256: None,
+        repo_file: Some("data/bhns_gw230529_ID.tar.gz".into()),
+        ..archive_input()
+    };
+    let mut sim = sample("x\n", "y\n");
+    sim.format = 3;
+    sim.inputs.push(repo_input.clone());
+    let text = sim.to_toml().unwrap();
+    assert!(text.starts_with("format = 3\n"), "{text}");
+    assert!(text.contains("repo-file = \"data/bhns_gw230529_ID.tar.gz\""), "{text}");
+    assert_eq!(SimFile::from_toml(&text).unwrap().inputs, sim.inputs);
+    let claims_2 = text.replacen("format = 3", "format = 2", 1);
+    assert!(SimFile::from_toml(&claims_2).unwrap_err().to_string().contains("needs format 3"));
+
+    let check = |input: Input| {
+        let mut sim = sample("x\n", "y\n");
+        sim.inputs.push(input);
+        sim.format = 3;
+        sim.validate().map_err(|e| e.to_string())
+    };
+    assert!(check(Input { sha256: Some("ab".repeat(32)), ..repo_input.clone() }).unwrap_err().contains("takes the place of url"));
+    assert!(check(Input { url: Some("https://x/a.tgz".into()), ..repo_input.clone() }).is_err());
+    assert!(check(Input { repo_file: Some("../secret.tgz".into()), ..repo_input.clone() }).unwrap_err().contains("relative path"));
+    assert!(check(Input { repo_file: Some("data/plain.h5".into()), ..repo_input.clone() }).unwrap_err().contains("not an archive"));
+    // Not unpacked: the knob gets the file itself.
+    check(Input { unpack: false, path: None, fixups: vec![], repo_file: Some("data/plain.h5".into()), ..repo_input }).unwrap();
 }
 
 #[test]
