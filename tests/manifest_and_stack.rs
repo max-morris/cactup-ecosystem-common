@@ -166,7 +166,7 @@ fn contact_must_be_a_url_or_mailto() {
 #[test]
 fn manifest_validation() {
     let neither = "format = 1\n";
-    assert!(invalid(neither).contains("[package] or a [stack]"));
+    assert!(invalid(neither).contains("[package], [stack] or [sim]"));
 
     let versioned_target = PACKAGE
         .replace("target = \"max-morris/carpetx-mp\"", "target = \"max-morris/carpetx-mp@1.0.0\"");
@@ -338,4 +338,30 @@ tag-pattern = "ET_{major}_{minor}_v{patch}"
 "#;
     let s = Manifest::from_toml(stack).unwrap().stack.unwrap();
     assert_eq!(s.tag_pattern.as_deref(), Some("ET_{major}_{minor}_v{patch}"));
+}
+
+/// cactarium-sim.toml: a sim published from its repo.
+#[test]
+fn sim_manifest() {
+    let text = r#"
+format = 1
+
+[sim]
+name = "bhns-gw230529-dense"
+owners = ["max-morris"]
+file = "bhns-gw230529-dense.sim"
+tag-pattern = "run-{major}.{minor}.{patch}"
+"#;
+    let m = Manifest::from_repo_file("cactarium-sim.toml", text).unwrap();
+    let s = m.sim.as_ref().unwrap();
+    assert_eq!(s.file, "bhns-gw230529-dense.sim");
+    assert_eq!(Manifest::from_toml(&toml::to_string(&m).unwrap()).unwrap(), m);
+    assert!(Manifest::from_repo_file("cactarium.toml", text).is_err());
+    assert!(Manifest::from_repo_file("cactarium-stack.toml", text).is_err());
+    for bad in ["../x.sim", "/x.sim", "a//b.sim", "./x.sim", ""] {
+        assert!(invalid(&text.replace("bhns-gw230529-dense.sim\"", &format!("{bad}\""))).contains("relative path"), "{bad}");
+    }
+    assert!(invalid(&text.replace("owners = [\"max-morris\"]", "owners = []")).contains("needs owners"));
+    let both = format!("{text}\n[package]\nname = \"x\"\nowners = [\"y\"]\n");
+    assert!(invalid(&both).contains("one of [package], [stack] or [sim]"));
 }

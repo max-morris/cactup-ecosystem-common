@@ -4,8 +4,10 @@
 //! - [`STACK_FILE`] (`cactarium-stack.toml`) describes a **stack** (`[stack]`, see
 //!   [`crate::stack`]). A repo holding one is a *manifest repo*; it may hold nothing else, or be a
 //!   package repo that also carries a stack.
+//! - [`SIM_FILE`] (`cactarium-sim.toml`) publishes a **sim** from the repo (`[sim]`): the `.sim`
+//!   file it names, read at each version tag. Uploads remain the other way to publish a sim.
 //!
-//! A repo can carry either file or both; the registry looks for each at every tag. Claims
+//! A repo can carry any of the three; the registry looks for each at every tag. Claims
 //! (`[[fork-of]]`, `[[depends-on]]`, `[[works-with]]`, `[[incompatible-with]]`) and `[[caveat]]`s
 //! may appear in either file.
 //!
@@ -27,6 +29,8 @@ use crate::{Error, MANIFEST_FORMAT, Result, generation};
 pub const PACKAGE_FILE: &str = "cactarium.toml";
 /// The stack manifest's file name, at the repo root.
 pub const STACK_FILE: &str = "cactarium-stack.toml";
+/// The sim manifest's file name, at the repo root.
+pub const SIM_FILE: &str = "cactarium-sim.toml";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -36,6 +40,8 @@ pub struct Manifest {
     pub package: Option<PackageSection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<StackSection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim: Option<SimSection>,
     /// Descriptions of the repo's tracks (tag prefixes), keyed by track name.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tracks: IndexMap<TrackName, TrackInfo>,
@@ -90,6 +96,54 @@ pub struct PackageSection {
     /// carried this file).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<semver::Version>,
+}
+
+/// A sim published from its repo (`cactarium-sim.toml`): at each version tag, the `.sim` file it
+/// names becomes that version.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct SimSection {
+    pub name: Name,
+    /// Cactarium users or orgs allowed to publish this repo's sim: the proof of repo control.
+    pub owners: Vec<Owner>,
+    /// The `.sim` file, relative to the repo root.
+    pub file: String,
+    /// Shown on the sim's page; default: the description inside the `.sim`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Where to go for help or to report problems; default: the `.sim`'s own contact, else the repo.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    /// How release tags become versions when they aren't `vX.Y.Z` (see
+    /// [`crate::version::TagPattern`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_pattern: Option<String>,
+    /// Release tags below this version aren't versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<semver::Version>,
+}
+
+impl SimSection {
+    pub fn validate(&self) -> Result<()> {
+        if self.owners.is_empty() {
+            return Err(Error::invalid(format!("[sim] in {SIM_FILE} needs owners")));
+        }
+        let f = &self.file;
+        let bad = f.is_empty()
+            || f.starts_with('/')
+            || f.contains('\\')
+            || f.split('/').any(|c| c.is_empty() || c == "." || c == "..");
+        if bad {
+            return Err(Error::invalid(format!("[sim] file '{f}' must be a relative path inside the repo")));
+        }
+        if let Some(c) = &self.contact {
+            validate_contact(c)?;
+        }
+        if let Some(t) = &self.tag_pattern {
+            crate::version::TagPattern::from_str(t)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -159,7 +213,14 @@ impl Manifest {
             STACK_FILE if m.stack.as_ref().is_some_and(|s| s.owners.is_empty()) => {
                 Err(Error::invalid(format!("[stack] in {STACK_FILE} needs owners")))
             }
-            PACKAGE_FILE | STACK_FILE => Ok(m),
+            SIM_FILE if m.sim.is_none() => Err(Error::invalid(format!("{SIM_FILE} must hold a [sim]"))),
+            PACKAGE_FILE if m.sim.is_some() => {
+                Err(Error::invalid(format!("[sim] belongs in {SIM_FILE}, not {PACKAGE_FILE}")))
+            }
+            STACK_FILE if m.sim.is_some() => {
+                Err(Error::invalid(format!("[sim] belongs in {SIM_FILE}, not {STACK_FILE}")))
+            }
+            PACKAGE_FILE | STACK_FILE | SIM_FILE => Ok(m),
             other => Err(Error::invalid(format!("'{other}' is not a Cactarium manifest file name"))),
         }
     }
@@ -180,10 +241,15 @@ impl Manifest {
         if self.format != MANIFEST_FORMAT {
             return Err(Error::invalid(format!("format must be {MANIFEST_FORMAT}")));
         }
-        match (&self.package, &self.stack) {
-            (Some(_), Some(_)) => return Err(Error::invalid("cactarium.toml has both [package] and [stack]")),
-            (None, None) => return Err(Error::invalid("cactarium.toml needs a [package] or a [stack] section")),
-            (Some(p), None) => {
+        match (&self.package, &self.stack, &self.sim) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                return Err(Error::invalid("a manifest holds one of [package], [stack] or [sim]"));
+            }
+            (None, None, None) => {
+                return Err(Error::invalid("a manifest needs a [package], [stack] or [sim] section"));
+            }
+            (None, None, Some(s)) => s.validate()?,
+            (Some(p), None, None) => {
                 if p.owners.is_empty() {
                     return Err(Error::invalid("[package] owners is empty"));
                 }
@@ -199,7 +265,7 @@ impl Manifest {
                     crate::version::TagPattern::from_str(t)?;
                 }
             }
-            (None, Some(s)) => s.validate()?,
+            (None, Some(s), None) => s.validate()?,
         }
         for f in &self.fork_of {
             bare_target(&f.target)?;
