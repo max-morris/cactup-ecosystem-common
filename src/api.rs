@@ -82,7 +82,7 @@ pub struct VersionInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Resolved {
-    /// The exact version: `owner/name@[track:]X.Y.Z`, or `owner/name@N` for a sim.
+    /// The exact version: `owner/name@[track:]X.Y.Z` (sims included).
     pub slug: String,
     /// `package`, `stack` or `sim`.
     pub kind: String,
@@ -175,7 +175,7 @@ pub struct ReleaseRequest {
 /// What a publish created.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Published {
-    /// `owner/name@N` or `owner/name@[track:]X.Y.Z`.
+    /// `owner/name@[track:]X.Y.Z`.
     pub slug: String,
     /// The page on the site.
     pub url: String,

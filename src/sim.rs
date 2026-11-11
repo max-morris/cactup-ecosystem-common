@@ -47,7 +47,7 @@ pub struct SimMeta {
     /// Where to go for help with this simulation: an `https://` URL or a `mailto:` address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
-    /// Set by the registry when the file is published: `owner/name@N`.
+    /// Set by the registry when the file is published: `owner/name@X.Y.Z` (`@track:X.Y.Z` on a track).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cactarium: Option<Slug>,
     /// The thornlist's `!DEFINE ROOT`, the source tree's directory under the install.
