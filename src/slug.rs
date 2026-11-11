@@ -1,8 +1,15 @@
 //! References users type: `owner/name`, `owner/name/Thorn`, `owner/name@...`.
 //!
 //! What follows `@` depends on the entry kind, so a [`Slug`] keeps it raw and offers typed
-//! readers: a range ([`Slug::req`]), an exact version ([`Slug::exact`]), a branch tip
-//! ([`Slug::tip`]), or a package's commit ([`Slug::commit`]).
+//! readers: a range ([`Slug::req`]), an exact version ([`Slug::exact`]) or a branch tip
+//! ([`Slug::tip`]). A package can also be named at a commit:
+//!
+//! - `owner/pkg#<sha>` names only a commit, full or abbreviated (at least 7 hex digits);
+//! - `owner/pkg@<x>` prefers every other reading: only when `<x>` names no version, range or
+//!   track does a registry try it as a commit ([`Slug::commit_fallback`]).
+//!
+//! An abbreviated id is resolved by the registry against the repo's history, and refused when it
+//! matches more than one commit.
 
 use std::fmt;
 use std::str::FromStr;
@@ -44,7 +51,12 @@ pub struct Slug {
     pub thorn: Option<String>,
     /// Everything after `@`, unparsed.
     pub at: Option<String>,
+    /// Everything after `#`: a commit id, full or abbreviated, lowercase hex. Never with `at`.
+    pub sha: Option<String>,
 }
+
+/// The shortest abbreviated commit id accepted.
+pub const MIN_COMMIT_PREFIX: usize = 7;
 
 fn valid_thorn(s: &str) -> bool {
     let mut chars = s.chars();
@@ -62,21 +74,27 @@ impl Slug {
         }
     }
 
-    /// `@<full commit id>` (40 or 64 hex digits): a package at one commit, whether or not a
-    /// version names it. Abbreviated ids are not accepted: a registry can't resolve one against a
-    /// remote without fetching its history, and short hex strings read as track names or versions.
-    pub fn commit(&self) -> Option<&str> {
-        self.at.as_deref().filter(|at| is_commit_id(at))
+    /// `#<sha>`: the commit this slug names, full or abbreviated. Nothing else reads `#`.
+    pub fn sha(&self) -> Option<&str> {
+        self.sha.as_deref()
+    }
+
+    /// `@<x>` that could also be a commit (lowercase hex, at least [`MIN_COMMIT_PREFIX`] digits).
+    /// Every other reading wins: try this only when `<x>` names no version, range or track.
+    pub fn commit_fallback(&self) -> Option<&str> {
+        self.at.as_deref().filter(|at| is_commit_prefix(at))
     }
 
     /// The `@` part as a version range (`^1.2`, `mixed-precision:^1`). No `@` means any version on
-    /// the default track. `@head`, `@master` and `@<commit>` are not ranges: check
-    /// [`Slug::tip`] and [`Slug::commit`] first.
+    /// the default track. `@head` and `@master` are not ranges (check [`Slug::tip`] first), and a
+    /// `#<sha>` slug names a commit, not a version.
     pub fn req(&self) -> Result<TrackedReq> {
+        if self.sha.is_some() {
+            return Err(Error::invalid(format!("'{self}' names a commit, not a version")));
+        }
         match &self.at {
             None => Ok(TrackedReq { track: None, req: semver::VersionReq::STAR }),
             Some(at) if at == HEAD || at == MASTER => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
-            Some(at) if is_commit_id(at) => Err(Error::invalid(format!("'{self}' names a commit, not a version"))),
             Some(at) => at.parse(),
         }
     }
@@ -108,17 +126,39 @@ impl Slug {
 
 /// A full commit id: 40 (SHA-1) or 64 (SHA-256) lowercase hex digits.
 pub fn is_commit_id(s: &str) -> bool {
-    (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    (s.len() == 40 || s.len() == 64) && is_lower_hex(s)
+}
+
+/// A commit id, full or abbreviated: [`MIN_COMMIT_PREFIX`] to 64 lowercase hex digits.
+pub fn is_commit_prefix(s: &str) -> bool {
+    (MIN_COMMIT_PREFIX..=64).contains(&s.len()) && is_lower_hex(s)
+}
+
+fn is_lower_hex(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 impl FromStr for Slug {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
         let bad = |why: &str| Error::invalid(format!("'{s}' is not a Cactarium reference: {why}"));
-        let (path, at) = match s.split_once('@') {
-            Some((_, "")) => return Err(bad("nothing follows '@'")),
-            Some((p, a)) => (p, Some(a.to_owned())),
-            None => (s, None),
+        if s.contains('@') && s.contains('#') {
+            return Err(bad("use '@' for a version or '#' for a commit, not both"));
+        }
+        let (path, at, sha) = if let Some((p, h)) = s.split_once('#') {
+            let h = h.to_ascii_lowercase();
+            if !is_commit_prefix(&h) {
+                return Err(bad(&format!(
+                    "'#' takes a commit id of {MIN_COMMIT_PREFIX} to 64 hex digits, not '{h}'"
+                )));
+            }
+            (p, None, Some(h))
+        } else {
+            match s.split_once('@') {
+                Some((_, "")) => return Err(bad("nothing follows '@'")),
+                Some((p, a)) => (p, Some(a.to_owned()), None),
+                None => (s, None, None),
+            }
         };
         let mut parts = path.split('/');
         let (Some(owner), Some(name)) = (parts.next(), parts.next()) else {
@@ -133,7 +173,7 @@ impl FromStr for Slug {
         {
             return Err(bad(&format!("'{t}' is not a thorn name")));
         }
-        Ok(Slug { owner: owner.parse()?, name: name.parse()?, thorn, at })
+        Ok(Slug { owner: owner.parse()?, name: name.parse()?, thorn, at, sha })
     }
 }
 
@@ -158,6 +198,9 @@ impl fmt::Display for Slug {
         }
         if let Some(a) = &self.at {
             write!(f, "@{a}")?;
+        }
+        if let Some(h) = &self.sha {
+            write!(f, "#{h}")?;
         }
         Ok(())
     }

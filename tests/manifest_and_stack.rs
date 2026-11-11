@@ -366,19 +366,28 @@ tag-pattern = "run-{major}.{minor}.{patch}"
     assert!(invalid(&both).contains("one of [package], [stack] or [sim]"));
 }
 
-/// `owner/pkg@<full commit id>` names a commit; abbreviations and hex-looking tracks don't.
+/// `owner/pkg#<sha>` names only a commit (full or abbreviated); `@<hex>` is a commit only as a
+/// fallback, after every other reading.
 #[test]
 fn slugs_name_commits() {
     use cactup_ecosystem_common::slug::Slug;
     let sha = "7b3a6b19bb6278d7ae9205bce817042c253a9591";
-    let s: Slug = format!("et/cottonmouth@{sha}").parse().unwrap();
-    assert_eq!(s.commit(), Some(sha));
-    assert!(s.req().unwrap_err().to_string().contains("names a commit"));
-    let thorn: Slug = format!("et/cottonmouth/CottonmouthZ4c4m@{sha}").parse().unwrap();
-    assert_eq!(thorn.commit(), Some(sha));
-    for not in ["et/cottonmouth@7b3a6b1", "et/cottonmouth@1.2.3", "et/cottonmouth@head", "et/cottonmouth@deadbeef"] {
-        assert_eq!(not.parse::<Slug>().unwrap().commit(), None, "{not}");
+    let full: Slug = format!("et/cottonmouth#{sha}").parse().unwrap();
+    assert_eq!(full.sha(), Some(sha));
+    assert!(full.req().unwrap_err().to_string().contains("names a commit"));
+    assert_eq!(full.to_string(), format!("et/cottonmouth#{sha}"));
+    let short: Slug = "et/cottonmouth/CottonmouthZ4c4m#7B3A6B1".parse().unwrap();
+    assert_eq!((short.sha(), short.thorn.as_deref()), (Some("7b3a6b1"), Some("CottonmouthZ4c4m")));
+    for bad in ["et/cottonmouth#7b3a6b", "et/cottonmouth#xyz1234", "et/cottonmouth@1.0#7b3a6b1", "et/cottonmouth#"] {
+        assert!(bad.parse::<Slug>().is_err(), "{bad}");
     }
-    let upper: Slug = format!("et/cottonmouth@{}", sha.to_uppercase()).parse().unwrap();
-    assert_eq!(upper.commit(), None);
+    // `@` prefers every other reading; hex is only a fallback.
+    let at: Slug = "et/cottonmouth@7b3a6b1".parse().unwrap();
+    assert_eq!(at.commit_fallback(), Some("7b3a6b1"));
+    assert!(at.req().is_err(), "7b3a6b1 is no version or track");
+    assert_eq!("et/cottonmouth@deadbeef".parse::<Slug>().unwrap().commit_fallback(), Some("deadbeef"));
+    assert!("et/cottonmouth@deadbeef".parse::<Slug>().unwrap().req().is_ok(), "reads as a track first");
+    for not in ["et/cottonmouth@1.2.3", "et/cottonmouth@head", "et/cottonmouth@beef12"] {
+        assert_eq!(not.parse::<Slug>().unwrap().commit_fallback(), None, "{not}");
+    }
 }
