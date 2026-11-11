@@ -240,7 +240,7 @@ impl Manifest {
 
     pub fn validate(&self) -> Result<()> {
         if !(1..=MANIFEST_FORMAT).contains(&self.format) {
-            return Err(Error::invalid(format!("format must be 1 to {MANIFEST_FORMAT}")));
+            return Err(Error::invalid(format!("format must be {}", generation::readable(MANIFEST_FORMAT))));
         }
         match (&self.package, &self.stack, &self.sim) {
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {

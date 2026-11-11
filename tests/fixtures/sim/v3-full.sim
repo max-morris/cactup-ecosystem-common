@@ -1,0 +1,114 @@
+format = 3
+
+[sim]
+name = "bhns-full"
+summary = "Every optional key"
+description = """
+Binary neutron star merger.
+
+With **markdown**."""
+authors = ["A. Author", "B. Author"]
+license = "MIT OR Apache-2.0"
+contact = "https://example.org/help"
+cactarium = "example/bhns-full@1.2.0"
+root = "Cactus"
+
+[thornlist]
+filename = "x.th"
+text = """
+!CRL_VERSION = 1.0
+!DEFINE ROOT = Cactus
+!TARGET = $ROOT/arrangements
+!TYPE = git
+!URL = https://github.com/example/CarpetX.git
+!NAME = carpetx
+!REPO_BRANCH = main
+CarpetX/CarpetX
+"""
+untracked = ["Local/Hack"]
+
+[parfile]
+filename = "x.par"
+kind = "par"
+vars = ["OUTDIR", "TASKS"]
+text = """
+ActiveThorns = "CarpetX"
+CarpetX::out_dir = "@OUTDIR@"
+"""
+
+[[input]]
+knob = "eos-table"
+description = "Equation of state table"
+url = "https://example.org/eos.h5"
+sha256 = "abababababababababababababababababababababababababababababababab"
+
+[[input]]
+knob = "asked"
+description = "Asked for on import"
+
+[[input]]
+knob = "initial-data"
+description = "Initial data, an archive"
+url = "https://example.org/id.tar.gz"
+sha256 = "efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef"
+unpack = true
+path = "id/X.info"
+
+[[input.fixup]]
+file = "id/X.info"
+replace = "/old/path"
+with = "{dir}/id"
+
+[[input.fixup]]
+file = "id/Y.info"
+replace = "a"
+with = "b"
+
+[[input]]
+knob = "local-data"
+description = "A file of this repo"
+repo-file = "data/local.dat"
+
+[[input]]
+knob = "local-archive"
+unpack = true
+path = "inner/dir"
+repo-file = "data/local.tar.xz"
+
+[[repo]]
+name = "carpetx"
+url = "https://github.com/example/CarpetX.git"
+ref = "main"
+commit = "3f2c9e1a00112233445566778899aabbccddeeff"
+cactarium = "example/carpetx@1.0.0"
+
+[[repo]]
+name = "tarball"
+url = "https://example.org/tarball.tar.gz"
+sha256 = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+
+[[repo]]
+name = "scratch"
+url = "https://github.com/example/Scratch.git"
+ref = "wip"
+dirty = true
+
+[run]
+tasks = 8
+cpus-per-task = 4
+gpus-per-task = 1
+walltime = "24:00:00"
+
+[provenance]
+exported-by = "cactup 0.9.0"
+exported-at = 2026-05-01T12:00:00Z
+machine = "example-cluster"
+flavor = "gpu"
+universe = "ghcr.io/example/cactus:latest"
+flags = ["--debug"]
+machine-disabled = ["Foo/Bar"]
+base = "example/stack@2.0.0"
+
+[provenance.extra]
+note = "hello"
+host = "login1"

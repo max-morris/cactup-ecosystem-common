@@ -401,7 +401,7 @@ impl SimFile {
     /// Structural checks that hold for every `.sim`, pinned or not.
     pub fn validate(&self) -> Result<()> {
         if !(1..=SIM_FORMAT).contains(&self.format) {
-            return Err(Error::invalid(format!("format must be 1 to {SIM_FORMAT}")));
+            return Err(Error::invalid(format!("format must be {}", generation::readable(SIM_FORMAT))));
         }
         if self.format < self.required_format() {
             return Err(Error::invalid(format!(

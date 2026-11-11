@@ -1,0 +1,24 @@
+{
+  "format": 1,
+  "stack": "example/carpetx@mixed-precision:1.2.0",
+  "root": "Cactus",
+  "thornlist": {
+    "filename": "carpetx.th",
+    "text": "!CRL_VERSION = 1.0\n!DEFINE ROOT = Cactus\n!TARGET = $ROOT/arrangements\n!TYPE = git\n!URL = https://github.com/example/CarpetX.git\n!NAME = carpetx\n!REPO_BRANCH = main\nCarpetX/CarpetX\n"
+  },
+  "repo": [
+    {
+      "name": "carpetx",
+      "url": "https://github.com/example/CarpetX.git",
+      "ref": "main",
+      "commit": "3f2c9e1a00112233445566778899aabbccddeeff",
+      "cactarium": "example/carpetx@1.0.0"
+    },
+    {
+      "name": "eos",
+      "url": "https://example.org/eos.tar.gz",
+      "sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+    }
+  ],
+  "recipe": "format = 1\n\n[stack]\nname = \"carpetx\"\nextends = [\"example/base@1.0.0\"]\npin-tag = \"ET_2026_05_v0\"\n"
+}
