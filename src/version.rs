@@ -243,10 +243,33 @@ impl FromStr for TrackedReq {
         if track.is_none() && s.starts_with(|c: char| c.is_ascii_lowercase()) && s != "x" {
             return Ok(TrackedReq { track: Some(s.parse()?), req: semver::VersionReq::STAR });
         }
-        let req = semver::VersionReq::parse(rest)
+        let req = semver::VersionReq::parse(&npm_style(rest))
             .map_err(|e| Error::invalid(format!("'{s}' is not a version range: {e}")))?;
         Ok(TrackedReq { track, req })
     }
+}
+
+/// Bare versions read as npm reads them, not as Cargo does: `1.2.3` is exactly 1.2.3, `1.2` is
+/// `~1.2` (any 1.2.x) and `1` is `^1` (any 1.x.x). A part with an operator (`^`, `~`, `=`, `>`,
+/// `<`) or a wildcard (`*`, `x`) keeps its meaning. Parts are comma-separated, as in `>=1.2, <2`.
+fn npm_style(req: &str) -> String {
+    req.split(',')
+        .map(|part| {
+            let p = part.trim();
+            let bare = p.starts_with(|c: char| c.is_ascii_digit())
+                && !p.split(['.', '-', '+']).take(3).any(|c| matches!(c, "*" | "x" | "X"));
+            if !bare {
+                return p.to_owned();
+            }
+            let core = p.split(['-', '+']).next().unwrap_or(p);
+            match core.split('.').count() {
+                1 => format!("^{p}"),
+                2 => format!("~{p}"),
+                _ => format!("={p}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl TryFrom<String> for TrackedReq {
@@ -273,6 +296,25 @@ impl fmt::Display for TrackedReq {
 
 #[cfg(test)]
 mod tests {
+    /// Bare versions read as npm reads them; operators and wildcards keep their meaning.
+    #[test]
+    fn bare_versions_are_npm_style() {
+        let m = |req: &str, v: &str| req.parse::<TrackedReq>().unwrap().req.matches(&semver::Version::parse(v).unwrap());
+        assert!(m("1.2.3", "1.2.3") && !m("1.2.3", "1.2.4") && !m("1.2.3", "1.3.0"));
+        assert!(m("1.2", "1.2.9") && !m("1.2", "1.3.0") && !m("1.2", "1.1.9"));
+        assert!(m("1", "1.9.0") && !m("1", "2.0.0"));
+        assert!(m("^1.2.3", "1.9.0") && !m("^1.2.3", "2.0.0") && !m("^1.2.3", "1.2.2"));
+        assert!(m("~1.2.3", "1.2.9") && !m("~1.2.3", "1.3.0"));
+        assert!(m("=1.2.3", "1.2.3") && !m("=1.2.3", "1.2.4"));
+        assert!(m(">=1.2, <2", "1.5.0") && !m(">=1.2, <2", "2.0.0"));
+        assert!(m("1.*", "1.7.0") && m("*", "9.0.0") && m("1.2.x", "1.2.5"));
+        assert!(m("2026.5", "2026.5.3") && !m("2026.5", "2026.6.0") && m("2026", "2026.11.0"));
+        assert!(m("1.2.3-rc.1", "1.2.3-rc.1") && !m("1.2.3-rc.1", "1.2.3"));
+        let t: TrackedReq = "mixed-precision:1.2".parse().unwrap();
+        assert_eq!(t.track.as_ref().map(ToString::to_string).as_deref(), Some("mixed-precision"));
+        assert!(t.req.matches(&semver::Version::parse("1.2.4").unwrap()) && !t.req.matches(&semver::Version::parse("1.3.0").unwrap()));
+    }
+
     use super::*;
 
     fn v(s: &str) -> TrackedVersion {
