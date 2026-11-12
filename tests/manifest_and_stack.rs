@@ -511,3 +511,17 @@ fn a_package_root_is_a_folder_inside_the_repo() {
         assert!(err.to_string().contains("folder inside the repo"), "{bad}: {err}");
     }
 }
+
+#[test]
+fn a_flesh_package_has_no_thorns() {
+    let m = |extra: &str| format!("format = 1\n[package]\nname = \"cactus\"\nowners = [\"et\"]\nflesh = true\n{extra}");
+    let p = Manifest::from_repo_file("cactarium.toml", &m("")).unwrap().package.unwrap();
+    assert!(p.flesh);
+    for bad in ["thorns = [\"x\"]\n", "arrangement = \"A\"\n", "root = \"src\"\n"] {
+        let err = Manifest::from_repo_file("cactarium.toml", &m(bad)).unwrap_err();
+        assert!(err.to_string().contains("a flesh has no thorns"), "{bad}: {err}");
+    }
+    // A mixed-precision flesh forks et/cactus.
+    let fork = m("\n[[fork-of]]\ntarget = \"et/cactus@~2026.5\"\n").replace("name = \"cactus\"", "name = \"cactus-mp\"");
+    assert_eq!(Manifest::from_repo_file("cactarium.toml", &fork).unwrap().fork_of.len(), 1);
+}

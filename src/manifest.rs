@@ -91,6 +91,11 @@ pub struct PackageSection {
     /// need it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement: Option<String>,
+    /// The package is a Cactus flesh (the repo holds `src/main/flesh.cc` and `lib/sbin/CST`)
+    /// rather than thorns: et/cactus, or a fork of it such as a mixed-precision flesh. It has no
+    /// thorns, so no `thorns`, `arrangement` or `root`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flesh: bool,
     /// Where the thorns are, relative to the repo root, when not at it: the folder holding the
     /// `Arrangement/Thorn/` (or `Thorn/`) directories. Kranc keeps its thorns under
     /// `Auxiliary/Cactus`. Default: the repo root.
@@ -369,6 +374,11 @@ impl Manifest {
             }
             (None, None, Some(s)) => s.validate()?,
             (Some(p), None, None) => {
+                if p.flesh && (p.thorns.is_some() || p.arrangement.is_some() || p.root.is_some()) {
+                    return Err(Error::invalid(
+                        "[package] flesh = true: a flesh has no thorns, so no thorns, arrangement or root",
+                    ));
+                }
                 if p.owners.is_empty() {
                     return Err(Error::invalid("[package] owners is empty"));
                 }

@@ -154,6 +154,10 @@ pub struct PackageVersion {
     #[serde(flatten)]
     pub version: VersionInfo,
     pub url: String,
+    /// A Cactus flesh (et/cactus or a fork of it) rather than thorns: `thorns` is empty, and the
+    /// repo is checked out as the Cactus root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flesh: bool,
     pub thorns: Vec<ThornInfo>,
     pub claims: Vec<ClaimInfo>,
 }
