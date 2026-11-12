@@ -350,7 +350,8 @@ impl Manifest {
     }
 
     pub fn from_toml(text: &str) -> Result<Manifest> {
-        generation::check(text, "cactarium.toml", MANIFEST_FORMAT, MANIFEST_FORMAT)?;
+        // Every generation back to 1: tags are immutable, so an old one is read forever.
+        generation::check(text, "cactarium.toml", 1, MANIFEST_FORMAT)?;
         let m: Manifest = toml::from_str(text).map_err(|source| Error::Toml { what: "cactarium.toml", source })?;
         m.validate()?;
         Ok(m)
@@ -362,8 +363,8 @@ impl Manifest {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.format != MANIFEST_FORMAT {
-            return Err(Error::invalid(format!("format must be {MANIFEST_FORMAT}")));
+        if !(1..=MANIFEST_FORMAT).contains(&self.format) {
+            return Err(Error::invalid(format!("format must be {}", generation::readable(MANIFEST_FORMAT))));
         }
         match (&self.package, &self.stack, &self.sim) {
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
