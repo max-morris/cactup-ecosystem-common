@@ -87,9 +87,11 @@ entry's kind decides what it means:
 | sim, `file` form | the sim | refused: a one-sim entry has no sims to name |
 | sim, `files` form | refused, listing its sims | `x` is one of its sims: `Slug::as_sim` checks sim-name rules |
 
-Declarations that name packages (`[[dependency]]`, `[[fork-of]]`, claims, a stack's `extends` and
-`package` overrides) refuse any third segment, as before. `valid_thorn` is public for clients that
-read a third segment as a thorn.
+Declarations that name packages or stacks keep their old rules: `[[dependency]]`, `[[fork-of]]`,
+claims and a stack's `extends` refuse any third segment; a stack override's `package`, a `.sim`
+pin's `cactarium` and its provenance `base` accept only a thorn name there (`Slug::as_thorn`), as
+before the segment widened. `valid_thorn` is public for clients that read a third segment as a
+thorn.
 
 An old CactUp reads `et/cottonmouth-sims/qc0-z4c` as a thorn (and refuses `qc0-z4c`, which is
 no thorn name, or ignores a thorn-like one). It stays safe: the Cactarium refuses a bare

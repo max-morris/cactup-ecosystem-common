@@ -452,6 +452,15 @@ impl SimFile {
         {
             return Err(Error::invalid("[provenance] has both a flavor and an optionlist"));
         }
+        // Package and stack references: a third segment, if any, is a thorn, as before slugs widened.
+        if let Some(b) = self.provenance.as_ref().and_then(|p| p.base.as_ref()) {
+            b.as_thorn()?;
+        }
+        for r in &self.repos {
+            if let Some(c) = &r.cactarium {
+                c.as_thorn()?;
+            }
+        }
         validate_repos(&self.repos)
     }
 

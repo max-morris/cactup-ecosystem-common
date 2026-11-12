@@ -325,6 +325,11 @@ fn a_three_part_stamp_needs_format_4() {
     let err = SimFile::from_toml(&claims_3).unwrap_err().to_string();
     assert!(err.contains("needs format 4"), "{err}");
 
+    // A pin's package reference keeps the thorn rules for its third segment.
+    let mut pinned = sample("x\n", "y\n");
+    pinned.repos[0].cactarium = Some("max-morris/carpetx/qc0-z4c@1.0.0".parse().unwrap());
+    assert!(pinned.validate().unwrap_err().to_string().contains("not a thorn name"));
+
     // The stamp's third segment is a sim name: lowercase, starting with a letter.
     let thorn_like = text.replace("qc0-z4c@", "Qc0@");
     let err = SimFile::from_toml(&thorn_like).unwrap_err().to_string();
