@@ -1,4 +1,10 @@
-//! References users type: `owner/name`, `owner/name/Thorn`, `owner/name@...`.
+//! References users type: `owner/name`, `owner/name/Thorn`, `owner/name/sim`, `owner/name@...`.
+//!
+//! The third segment is kept raw ([`Slug::thorn`], `[A-Za-z][A-Za-z0-9_.-]*`); the entry's kind
+//! decides what it means. For a package it is a thorn ([`Slug::as_thorn`] checks thorn-name rules);
+//! for a multi-sim entry (`[sim.files]`) it is one of its sims ([`Slug::as_sim`] checks sim-name
+//! rules), which such an entry always needs. A reader from before multi-sim entries took any third
+//! segment for a thorn, and only accepted thorn names there.
 //!
 //! What follows `@` depends on the entry kind, so a [`Slug`] keeps it raw and offers typed
 //! readers: a range ([`Slug::req`]), an exact version ([`Slug::exact`]) or a branch tip
@@ -16,7 +22,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::name::{Name, Owner};
+use crate::name::{Name, Owner, SimName};
 use crate::version::{TrackedReq, TrackedVersion};
 use crate::{Error, Result};
 
@@ -47,7 +53,9 @@ pub enum Tip {
 pub struct Slug {
     pub owner: Owner,
     pub name: Name,
-    /// A thorn inside a package (`owner/pkg/Thorn`). Thorn names keep Cactus's case.
+    /// The third segment, raw: a thorn inside a package (`owner/pkg/Thorn`, keeping Cactus's case;
+    /// read it with [`Slug::as_thorn`]) or one sim of a multi-sim entry (`owner/name/qc0-z4c`; read
+    /// it with [`Slug::as_sim`]). The entry's kind decides which.
     pub thorn: Option<String>,
     /// Everything after `@`, unparsed.
     pub at: Option<String>,
@@ -58,13 +66,39 @@ pub struct Slug {
 /// The shortest abbreviated commit id accepted.
 pub const MIN_COMMIT_PREFIX: usize = 7;
 
-pub(crate) fn valid_thorn(s: &str) -> bool {
+/// A Cactus thorn name: `[A-Za-z][A-Za-z0-9_]*`.
+pub fn valid_thorn(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// What a slug's third segment may hold: a thorn or a sim name, `[A-Za-z][A-Za-z0-9_.-]*`.
+fn valid_segment(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+}
+
 impl Slug {
+    /// The third segment read as a thorn (`owner/pkg/Thorn`): `None` without one, an error when it
+    /// is not a thorn name. For packages, and anywhere else a third segment means a thorn.
+    pub fn as_thorn(&self) -> Result<Option<&str>> {
+        match self.thorn.as_deref() {
+            Some(t) if !valid_thorn(t) => Err(Error::invalid(format!("'{t}' in '{self}' is not a thorn name"))),
+            t => Ok(t),
+        }
+    }
+
+    /// The third segment read as one sim of a multi-sim entry (`owner/name/qc0-z4c`): `None`
+    /// without one, an error when it is not a sim name (lowercase, starting with a letter).
+    pub fn as_sim(&self) -> Result<Option<SimName>> {
+        self.thorn
+            .as_deref()
+            .map(|s| s.parse::<SimName>().map_err(|e| Error::invalid(format!("'{s}' in '{self}': {e}"))))
+            .transpose()
+    }
+
     /// `@head` or `@master`: one of a stack's unpinned forms.
     pub fn tip(&self) -> Option<Tip> {
         match self.at.as_deref() {
@@ -166,12 +200,12 @@ impl FromStr for Slug {
         };
         let thorn = parts.next().map(str::to_owned);
         if parts.next().is_some() {
-            return Err(bad("expected owner/name or owner/name/Thorn"));
+            return Err(bad("expected owner/name, owner/name/Thorn or owner/name/sim"));
         }
         if let Some(t) = &thorn
-            && !valid_thorn(t)
+            && !valid_segment(t)
         {
-            return Err(bad(&format!("'{t}' is not a thorn name")));
+            return Err(bad(&format!("'{t}' is not a thorn or sim name")));
         }
         Ok(Slug { owner: owner.parse()?, name: name.parse()?, thorn, at, sha })
     }
@@ -237,9 +271,36 @@ mod tests {
 
     #[test]
     fn rejects_malformed() {
-        for s in ["carpetx", "a/b/c/d", "a/b@", "A/b", "a/b/1Thorn", "a/b/Th-orn", "a/b@0"] {
+        for s in ["carpetx", "a/b/c/d", "a/b@", "A/b", "a/b/1Thorn", "a/b/-x", "a/b/x y", "a/b/x/", "a/b@0"] {
             let r = s.parse::<Slug>().and_then(|x| x.number().map(|_| x));
             assert!(r.is_err(), "{s} should be rejected");
         }
+    }
+
+    /// The third segment is a thorn or a sim, by the entry's kind; each reading checks its rules.
+    #[test]
+    fn third_segment_is_a_thorn_or_a_sim() {
+        let sim: Slug = "et/cottonmouth-sims/qc0-z4c@^1".parse().unwrap();
+        assert_eq!(sim.entry(), "et/cottonmouth-sims");
+        assert_eq!(sim.as_sim().unwrap().unwrap().as_str(), "qc0-z4c");
+        assert!(sim.as_thorn().is_err(), "a sim name with '-' is not a thorn name");
+        assert_eq!(sim.to_string(), "et/cottonmouth-sims/qc0-z4c@^1");
+        assert!(sim.req().unwrap().matches(&"1.2.0".parse().unwrap()));
+
+        let thorn: Slug = "et/carpetx/CarpetX".parse().unwrap();
+        assert_eq!(thorn.as_thorn().unwrap(), Some("CarpetX"));
+        assert!(thorn.as_sim().is_err(), "a sim name is lowercase");
+
+        let both: Slug = "et/x/qc0".parse().unwrap();
+        assert_eq!(both.as_thorn().unwrap(), Some("qc0"));
+        assert_eq!(both.as_sim().unwrap().unwrap().as_str(), "qc0");
+
+        let dotted: Slug = "et/x/bhns.gw230529@1.0.0".parse().unwrap();
+        assert!(dotted.as_thorn().is_err());
+        assert_eq!(dotted.as_sim().unwrap().unwrap().as_str(), "bhns.gw230529");
+
+        let none: Slug = "et/x".parse().unwrap();
+        assert_eq!(none.as_thorn().unwrap(), None);
+        assert!(none.as_sim().unwrap().is_none());
     }
 }

@@ -1,7 +1,9 @@
-//! Owner and entry names.
+//! Owner, entry and sim names.
 //!
-//! Both are lowercase so that uniqueness is case-insensitive by construction:
-//! `[a-z0-9]` followed by up to 63 of `[a-z0-9._-]`, not ending in `.` or `-`, with no `..`.
+//! All are lowercase so that uniqueness is case-insensitive by construction:
+//! `[a-z0-9]` followed by up to 63 of `[a-z0-9._-]`, not ending in `.` or `-`, with no `..`. A
+//! [`SimName`] (one sim of a multi-sim entry, `[sim.files]`) follows the entry rules and must also
+//! start with a letter, so that `owner/name/sim` never reads as a version or a commit.
 
 use std::fmt;
 use std::str::FromStr;
@@ -16,6 +18,9 @@ fn validate(kind: &str, s: &str) -> Result<()> {
     let bad = |why: &str| Err(Error::invalid(format!("'{s}' is not a valid {kind} name: {why}")));
     if s.is_empty() {
         return bad("it is empty");
+    }
+    if kind == "sim" && !s.as_bytes()[0].is_ascii_lowercase() {
+        return bad("it must start with a lowercase letter");
     }
     if s.len() > MAX_LEN {
         return bad("it is longer than 64 characters");
@@ -80,6 +85,7 @@ macro_rules! name_type {
 
 name_type!(Owner, "owner");
 name_type!(Name, "entry");
+name_type!(SimName, "sim");
 
 #[cfg(test)]
 mod tests {
@@ -89,6 +95,16 @@ mod tests {
     fn accepts_typical_names() {
         for s in ["max-morris", "carpetx", "et", "qc0-bbh", "bhns.gw230529", "a_b", "0x"] {
             Name::from_str(s).unwrap();
+        }
+    }
+
+    #[test]
+    fn sim_names_start_with_a_letter() {
+        for s in ["qc0-z4c", "mag-tov", "a", "bhns.gw230529", "x_1"] {
+            SimName::from_str(s).unwrap();
+        }
+        for s in ["0x", "1qc", "_a", "Qc0", "qc0-", "a..b", "a/b", ""] {
+            assert!(SimName::from_str(s).is_err(), "{s:?} should be rejected");
         }
     }
 

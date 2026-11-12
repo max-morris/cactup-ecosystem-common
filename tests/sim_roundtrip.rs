@@ -128,9 +128,9 @@ fn unknown_keys_are_rejected() {
 
 #[test]
 fn newer_format_asks_for_an_upgrade() {
-    let out = sample("x\n", "y\n").to_toml().unwrap().replacen("format = 1", "format = 4", 1);
+    let out = sample("x\n", "y\n").to_toml().unwrap().replacen("format = 1", "format = 5", 1);
     let err = SimFile::from_toml(&out).unwrap_err();
-    assert!(matches!(err, Error::NewerFormat { found: 4, supported: 3, .. }), "{err}");
+    assert!(matches!(err, Error::NewerFormat { found: 5, supported: 4, .. }), "{err}");
     assert!(err.to_string().contains("upgrade"));
 }
 
@@ -302,4 +302,31 @@ fn real_files_round_trip() {
     let back = SimFile::from_toml(&sim.to_toml().unwrap()).unwrap();
     assert_eq!(back.thornlist.text, th);
     assert_eq!(back.parfile.text, par);
+}
+
+/// A stored copy of one sim of a multi-sim entry is stamped `owner/name/sim@X.Y.Z`, which needs
+/// format 4: a reader from before it would take the third segment for a thorn, and is asked to
+/// upgrade instead. A two-part stamp needs nothing new.
+#[test]
+fn a_three_part_stamp_needs_format_4() {
+    let mut sim = sample("x\n", "y\n");
+    sim.sim.cactarium = Some("et/cottonmouth-sims@1.0.0".parse().unwrap());
+    assert!(sim.to_toml().unwrap().starts_with("format = 1\n"), "a two-part stamp needs nothing new");
+
+    sim.sim.cactarium = Some("et/cottonmouth-sims/qc0-z4c@1.0.0".parse().unwrap());
+    let text = sim.to_toml().unwrap();
+    assert!(text.starts_with("format = 4\n"), "{text}");
+    assert!(text.contains("cactarium = \"et/cottonmouth-sims/qc0-z4c@1.0.0\""), "{text}");
+    let back = SimFile::from_toml(&text).unwrap();
+    assert_eq!(back.format, 4);
+    assert_eq!(back.sim.cactarium.as_ref().unwrap().as_sim().unwrap().unwrap().as_str(), "qc0-z4c");
+
+    let claims_3 = text.replacen("format = 4", "format = 3", 1);
+    let err = SimFile::from_toml(&claims_3).unwrap_err().to_string();
+    assert!(err.contains("needs format 4"), "{err}");
+
+    // The stamp's third segment is a sim name: lowercase, starting with a letter.
+    let thorn_like = text.replace("qc0-z4c@", "Qc0@");
+    let err = SimFile::from_toml(&thorn_like).unwrap_err().to_string();
+    assert!(err.contains("[sim] cactarium"), "{err}");
 }

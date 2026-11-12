@@ -5,7 +5,8 @@
 //!   [`crate::stack`]). A repo holding one is a *manifest repo*; it may hold nothing else, or be a
 //!   package repo that also carries a stack.
 //! - [`SIM_FILE`] (`cactarium-sim.toml`) publishes a **sim** from the repo (`[sim]`): the `.sim`
-//!   file it names, read at each version tag. Uploads remain the other way to publish a sim.
+//!   file it names (`file`), or several sims at once (`[sim.files]`, manifest format 2), read at
+//!   each version tag. Uploads remain the other way to publish a sim.
 //!
 //! A repo can carry any of the three; the registry looks for each at every tag. Dependencies
 //! (`[[dependency]]`), claims (`[[fork-of]]`, `[[works-with]]`, `[[incompatible-with]]`) and
@@ -28,7 +29,7 @@ use std::str::FromStr;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-use crate::name::{Name, Owner};
+use crate::name::{Name, Owner, SimName};
 use crate::slug::Slug;
 use crate::stack::StackSection;
 use crate::version::{DEFAULT_TRACK_KEYWORD, TrackName, TrackedVersion};
@@ -131,15 +132,24 @@ pub struct PackageSection {
 }
 
 /// A sim published from its repo (`cactarium-sim.toml`): at each version tag, the `.sim` file it
-/// names becomes that version.
+/// names becomes that version (`file`), or every sim it lists does, together (`files`). Exactly one
+/// of the two. The form decides how the entry is addressed, never the count: a `file` entry is
+/// `owner/name` and its stored copy is stamped `owner/name@X.Y.Z`; a `files` entry is always
+/// `owner/name/sim`, stamped `owner/name/sim@X.Y.Z`, even while it lists one sim.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SimSection {
     pub name: Name,
     /// Cactarium users or orgs allowed to publish this repo's sim: the proof of repo control.
     pub owners: Vec<Owner>,
-    /// The `.sim` file, relative to the repo root.
-    pub file: String,
+    /// The `.sim` file, relative to the repo root. Not with `files`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Several sims released together, each `.sim` file (relative to the repo root) keyed by its sim
+    /// name (a [`SimName`]: lowercase, starting with a letter). Not with `file`. Needs manifest
+    /// format 2, so that a reader from before it says "upgrade" rather than "unknown key".
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub files: IndexMap<SimName, String>,
     /// Shown on the sim's page; default: the description inside the `.sim`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -155,18 +165,59 @@ pub struct SimSection {
     pub since: Option<semver::Version>,
 }
 
+/// Which form a [`SimSection`] takes: what its sims are, and so how they are addressed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SimForm<'a> {
+    /// `file`: one sim, the entry itself (`owner/name`).
+    File(&'a str),
+    /// `[sim.files]`: named sims (`owner/name/sim`), each with its file.
+    Files(&'a IndexMap<SimName, String>),
+}
+
 impl SimSection {
+    /// The form, once [`SimSection::validate`] passed: `file` or `files`.
+    pub fn form(&self) -> SimForm<'_> {
+        match &self.file {
+            Some(f) => SimForm::File(f),
+            None => SimForm::Files(&self.files),
+        }
+    }
+
+    /// Every sim with its file: for a `file` entry one, named `None`.
+    pub fn sims(&self) -> Vec<(Option<&SimName>, &str)> {
+        match self.form() {
+            SimForm::File(f) => vec![(None, f)],
+            SimForm::Files(m) => m.iter().map(|(n, f)| (Some(n), f.as_str())).collect(),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.owners.is_empty() {
             return Err(Error::invalid(format!("[sim] in {SIM_FILE} needs owners")));
         }
-        let f = &self.file;
-        let bad = f.is_empty()
-            || f.starts_with('/')
-            || f.contains('\\')
-            || f.split('/').any(|c| c.is_empty() || c == "." || c == "..");
-        if bad {
-            return Err(Error::invalid(format!("[sim] file '{f}' must be a relative path inside the repo")));
+        let in_repo = |what: &str, f: &str| {
+            let bad = f.is_empty()
+                || f.starts_with('/')
+                || f.contains('\\')
+                || f.split('/').any(|c| c.is_empty() || c == "." || c == "..");
+            if bad { Err(Error::invalid(format!("{what} '{f}' must be a relative path inside the repo"))) } else { Ok(()) }
+        };
+        match (&self.file, self.files.is_empty()) {
+            (Some(_), false) => {
+                return Err(Error::invalid("[sim] gives both file (one sim) and [sim.files] (several); use one"));
+            }
+            (None, true) => {
+                return Err(Error::invalid("[sim] needs file (one sim) or [sim.files] (several, keyed by sim name)"));
+            }
+            (Some(f), true) => in_repo("[sim] file", f)?,
+            (None, false) => {
+                for (i, (name, f)) in self.files.iter().enumerate() {
+                    in_repo(&format!("[sim.files] {name}"), f)?;
+                    if let Some((other, _)) = self.files.iter().take(i).find(|(_, g)| *g == f) {
+                        return Err(Error::invalid(format!("[sim.files] {other} and {name} name the same file '{f}'")));
+                    }
+                }
+            }
         }
         if let Some(c) = &self.contact {
             validate_contact(c)?;
@@ -456,9 +507,21 @@ impl Manifest {
         toml::to_string(self).map_err(|source| Error::Serialize { what: "cactarium.toml", source })
     }
 
+    /// The oldest format generation that can hold this manifest: 2 for `[sim.files]`, else 1.
+    pub fn required_format(&self) -> u32 {
+        if self.sim.as_ref().is_some_and(|s| !s.files.is_empty()) { 2 } else { 1 }
+    }
+
     pub fn validate(&self) -> Result<()> {
         if !(1..=MANIFEST_FORMAT).contains(&self.format) {
             return Err(Error::invalid(format!("format must be {}", generation::readable(MANIFEST_FORMAT))));
+        }
+        if self.format < self.required_format() {
+            return Err(Error::invalid(format!(
+                "[sim.files] needs format = {} (format {} can't hold it); readers from before it then ask to be upgraded",
+                self.required_format(),
+                self.format
+            )));
         }
         match (&self.package, &self.stack, &self.sim) {
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {

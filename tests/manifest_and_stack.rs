@@ -420,7 +420,9 @@ tag-pattern = "run-{major}.{minor}.{patch}"
 "#;
     let m = Manifest::from_repo_file("cactarium-sim.toml", text).unwrap();
     let s = m.sim.as_ref().unwrap();
-    assert_eq!(s.file, "bhns-gw230529-dense.sim");
+    assert_eq!(s.file.as_deref(), Some("bhns-gw230529-dense.sim"));
+    assert_eq!(s.sims(), vec![(None, "bhns-gw230529-dense.sim")]);
+    assert_eq!(m.required_format(), 1);
     assert_eq!(Manifest::from_toml(&toml::to_string(&m).unwrap()).unwrap(), m);
     assert!(Manifest::from_repo_file("cactarium.toml", text).is_err());
     assert!(Manifest::from_repo_file("cactarium-stack.toml", text).is_err());
@@ -430,6 +432,71 @@ tag-pattern = "run-{major}.{minor}.{patch}"
     assert!(invalid(&text.replace("owners = [\"max-morris\"]", "owners = []")).contains("needs owners"));
     let both = format!("{text}\n[package]\nname = \"x\"\nowners = [\"y\"]\n");
     assert!(invalid(&both).contains("one of [package], [stack] or [sim]"));
+}
+
+const MULTI_SIM: &str = r#"
+format = 2
+
+[sim]
+name = "cottonmouth-sims"
+owners = ["et"]
+description = "Cottonmouth's example simulations"
+tag-pattern = "sim-v{major}.{minor}.{patch}"
+
+[sim.files]
+qc0-bssnok = "examples/sims/qc0-bssnok.sim"
+qc0-z4c    = "examples/sims/qc0-z4c.sim"
+mag-tov    = "examples/sims/mag-tov.sim"
+"#;
+
+/// `[sim.files]`: several sims released together, keyed by sim name, in the order written.
+#[test]
+fn multi_sim_manifest() {
+    use cactup_ecosystem_common::manifest::SimForm;
+    let m = Manifest::from_repo_file("cactarium-sim.toml", MULTI_SIM).unwrap();
+    assert_eq!(m.required_format(), 2);
+    let s = m.sim.as_ref().unwrap();
+    assert!(s.file.is_none());
+    let names: Vec<String> = s.sims().iter().map(|(n, _)| n.unwrap().to_string()).collect();
+    assert_eq!(names, ["qc0-bssnok", "qc0-z4c", "mag-tov"]);
+    assert_eq!(s.sims()[1].1, "examples/sims/qc0-z4c.sim");
+    assert!(matches!(s.form(), SimForm::Files(f) if f.len() == 3));
+    // Through TOML and through JSON (as the Cactarium stores it), unchanged.
+    assert_eq!(Manifest::from_toml(&toml::to_string(&m).unwrap()).unwrap(), m);
+    let json = serde_json::to_value(&m).unwrap();
+    assert_eq!(serde_json::from_value::<Manifest>(json).unwrap(), m);
+}
+
+/// `[sim.files]` needs format 2; the names are sim names; it excludes `file`; paths stay in the repo.
+#[test]
+fn multi_sim_manifest_is_checked() {
+    let err = invalid(&MULTI_SIM.replace("format = 2", "format = 1"));
+    assert!(err.contains("needs format = 2"), "{err}");
+    let err = invalid(&MULTI_SIM.replace("[sim.files]", "file = \"x.sim\"\n\n[sim.files]"));
+    assert!(err.contains("both file"), "{err}");
+    let none = MULTI_SIM.split("[sim.files]").next().unwrap().to_owned();
+    assert!(invalid(&none).contains("needs file"));
+    let err = invalid(&MULTI_SIM.replace("\"examples/sims/mag-tov.sim\"", "\"../mag-tov.sim\""));
+    assert!(err.contains("[sim.files] mag-tov") && err.contains("relative path"), "{err}");
+    let err = invalid(&MULTI_SIM.replace("\"examples/sims/mag-tov.sim\"", "\"examples/sims/qc0-z4c.sim\""));
+    assert!(err.contains("the same file"), "{err}");
+    for bad in ["0qc", "Qc0", "qc0-", "_x"] {
+        let text = MULTI_SIM.replace("mag-tov    =", &format!("{bad} ="));
+        assert!(matches!(Manifest::from_toml(&text), Err(Error::Toml { .. })), "{bad} should be refused");
+    }
+    // TOML itself refuses a name listed twice.
+    let twice = MULTI_SIM.replace("mag-tov    =", "qc0-z4c =");
+    assert!(Manifest::from_toml(&twice).is_err());
+}
+
+/// A reader of format 1 (before `[sim.files]`) asks to be upgraded rather than failing on the key:
+/// format 2 is newer than it reads. This crate reads both.
+#[test]
+fn format_3_manifests_ask_for_an_upgrade() {
+    let err = Manifest::from_toml(&MULTI_SIM.replace("format = 2", "format = 3")).unwrap_err();
+    assert!(matches!(err, Error::NewerFormat { found: 3, supported: 2, .. }), "{err}");
+    // Format 2 without [sim.files] is fine: generations only add.
+    Manifest::from_toml(&PACKAGE.replace("format = 1", "format = 2")).unwrap();
 }
 
 /// `owner/pkg#<sha>` names only a commit (full or abbreviated); `@<hex>` is a commit only as a

@@ -47,7 +47,9 @@ pub struct SimMeta {
     /// Where to go for help with this simulation: an `https://` URL or a `mailto:` address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contact: Option<String>,
-    /// Set by the registry when the file is published: `owner/name@X.Y.Z` (`@track:X.Y.Z` on a track).
+    /// Set by the registry when the file is published: `owner/name@X.Y.Z` (`@track:X.Y.Z` on a
+    /// track), or `owner/name/sim@X.Y.Z` for one sim of a multi-sim entry (`[sim.files]`), which
+    /// needs format 4.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cactarium: Option<Slug>,
     /// The thornlist's `!DEFINE ROOT`, the source tree's directory under the install.
@@ -381,15 +383,18 @@ impl SimFile {
     /// Written as the oldest generation that holds this content ([`Self::required_format`]),
     /// whatever `format` says, so readers older than a feature the file does not use still read it.
     pub fn to_toml(&self) -> Result<String> {
-        self.validate()?;
         let file = SimFile { format: self.required_format(), ..self.clone() };
+        file.validate()?;
         toml::to_string(&file).map_err(|source| Error::Serialize { what: "the .sim file", source })
     }
 
-    /// The oldest generation that can hold this file: 3 when an input is a file of the sim's own
+    /// The oldest generation that can hold this file: 4 when it is stamped as one sim of a
+    /// multi-sim entry (`owner/name/sim@X.Y.Z`), 3 when an input is a file of the sim's own
     /// repository, 2 when an input unpacks an archive, else 1.
     pub fn required_format(&self) -> u32 {
-        if self.inputs.iter().any(|i| i.repo_file.is_some()) {
+        if self.sim.cactarium.as_ref().is_some_and(|s| s.thorn.is_some()) {
+            4
+        } else if self.inputs.iter().any(|i| i.repo_file.is_some()) {
             3
         } else if self.inputs.iter().any(|i| i.unpack) {
             2
@@ -405,11 +410,14 @@ impl SimFile {
         }
         if self.format < self.required_format() {
             return Err(Error::invalid(format!(
-                "format {} cannot hold this file's inputs (archive inputs need format 2, repo-file inputs 3); \
-                 it needs format {}",
+                "format {} cannot hold this file (archive inputs need format 2, repo-file inputs 3, \
+                 a stamp naming one sim of a multi-sim entry 4); it needs format {}",
                 self.format,
                 self.required_format()
             )));
+        }
+        if let Some(stamp) = &self.sim.cactarium {
+            stamp.as_sim().map_err(|e| Error::invalid(format!("[sim] cactarium: {e}")))?;
         }
         if self.sim.name.trim().is_empty() {
             return Err(Error::invalid("[sim] name is empty"));
