@@ -116,10 +116,11 @@ impl TrackedVersion {
     }
 }
 
-/// How release tags that aren't `vX.Y.Z` become versions: literal text around `{major}`,
-/// `{minor}` and `{patch}`, each exactly once. `ET_{major}_{minor}_v{patch}` reads the Einstein
-/// Toolkit's `ET_2026_05_v0` as 2026.5.0 (on the default track). A manifest gives it as
-/// `tag-pattern`; with one, only tags it matches are versions.
+/// How release tags that aren't `vX.Y.Z` become versions: literal text around `{major}` and,
+/// optionally, `{minor}` and `{patch}`, each at most once; one left out reads as 0.
+/// `ET_{major}_{minor}_v{patch}` reads the Einstein Toolkit's `ET_2026_05_v0` as 2026.5.0, and
+/// `v{major}.{minor}` reads AsterX's `v1.0` as 1.0.0 (on the default track). A manifest gives it
+/// as `tag-pattern`; with one, only tags it matches are versions.
 #[derive(Clone, Debug)]
 pub struct TagPattern {
     text: String,
@@ -135,7 +136,8 @@ impl TagPattern {
     pub fn version(&self, tag: &str) -> Option<TrackedVersion> {
         let tag = tag.strip_prefix("refs/tags/").unwrap_or(tag);
         let c = self.re.captures(tag)?;
-        let n = |k: &str| c[k].parse::<u64>().ok();
+        // A part the pattern leaves out reads as 0.
+        let n = |k: &str| c.name(k).map_or(Some(0), |m| m.as_str().parse::<u64>().ok());
         Some(TrackedVersion { track: None, version: semver::Version::new(n("major")?, n("minor")?, n("patch")?) })
     }
 }
@@ -167,8 +169,11 @@ impl FromStr for TagPattern {
         }
         re.push_str(&regex::escape(rest));
         re.push('$');
-        if seen.len() != 3 {
-            return Err(bad("needs {major}, {minor} and {patch}"));
+        if !seen.contains(&"major") {
+            return Err(bad("needs {major} ({minor} and {patch} may be left out, reading as 0)"));
+        }
+        if seen.contains(&"patch") && !seen.contains(&"minor") {
+            return Err(bad("{patch} needs {minor}"));
         }
         let re = regex::Regex::new(&re).map_err(|e| bad(&e.to_string()))?;
         Ok(TagPattern { text: pattern.to_owned(), re })

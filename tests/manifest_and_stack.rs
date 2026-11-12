@@ -359,9 +359,16 @@ fn tag_pattern_and_since() {
     assert_eq!(p.version("ET_2026_05_v0").unwrap().version, semver::Version::new(2026, 5, 0));
     assert_eq!(p.version("refs/tags/ET_2025_11_v2").unwrap().version, semver::Version::new(2025, 11, 2));
     assert!(p.version("ET_2026_05").is_none() && p.version("v1.2.3").is_none() && p.version("xET_2026_05_v0").is_none());
-    for bad in ["ET_{major}_{minor}", "ET_{major}_{major}_v{patch}", "{major}.{minor}.{build}", "a b{major}{minor}{patch}", "{major"] {
+    for bad in ["ET_{minor}_{patch}", "ET_{major}_v{patch}", "ET_{major}_{major}_v{patch}", "{major}.{minor}.{build}", "a b{major}{minor}{patch}", "{major"] {
         assert!(bad.parse::<TagPattern>().is_err(), "{bad}");
     }
+    // A pattern may leave out {patch}, or {minor} and {patch}: they read as 0 (AsterX tags v1.0).
+    let two: TagPattern = "v{major}.{minor}".parse().unwrap();
+    assert_eq!(two.version("v1.0").unwrap().version, semver::Version::new(1, 0, 0));
+    assert_eq!(two.version("v1.12").unwrap().version, semver::Version::new(1, 12, 0));
+    assert!(two.version("v0.1.0").is_none(), "only tags the pattern matches are versions");
+    let one: TagPattern = "release-{major}".parse().unwrap();
+    assert_eq!(one.version("release-7").unwrap().version, semver::Version::new(7, 0, 0));
 
     let pkg = r#"
 format = 1
