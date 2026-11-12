@@ -20,7 +20,6 @@ target = "einsteintoolkit/carpetx"
 
 [[dependency]]
 target = "max-morris/cactus@mixed-precision:^1"
-needs = []
 
 [[dependency]]
 target = "einsteintoolkit/amrex#0123abcd"
@@ -49,7 +48,7 @@ fn package_manifest_parses_and_round_trips() {
     assert_eq!(p.owners[0].as_str(), "max-morris");
     let dep = &m.dependencies[0];
     assert!(dep.target.as_ref().unwrap().req().unwrap().matches(&"mixed-precision:1.3.0".parse().unwrap()));
-    assert!(dep.needs.as_deref() == Some(&[][..]) && dep.needed_by.is_empty(), "a flesh: needs = []");
+    assert!(dep.needs.is_none() && dep.needed_by.is_empty(), "a flesh: no needs");
     let pin = &m.dependencies[1];
     assert_eq!(pin.target.as_ref().unwrap().sha(), Some("0123abcd"));
     assert_eq!(pin.needs.as_deref(), Some(&["AMReX".to_owned()][..]));
@@ -79,10 +78,11 @@ fn dependency_targets_and_thorn_lists_are_checked() {
     assert!(dep("target = \"et/carpetx\"\nneeds = [\"CarpetX\"]").is_ok());
     assert!(dep("target = \"et/carpetx@^2026.5\"\nneeds = [\"CarpetX\", \"Loop\"]").is_ok());
     assert!(dep("target = \"et/carpetx#2bb7f9bc10d7\"\nneeds = [\"Loop\"]").is_ok());
-    // In a [package], needs is required; [] only for a target with no thorns (a flesh).
-    let err = dep("target = \"et/carpetx\"").unwrap_err().to_string();
-    assert!(err.contains("has no needs"), "{err}");
-    assert!(dep("target = \"et/cactus\"\nneeds = []").is_ok());
+    // needs is left out only for a target with no thorns (a flesh or a library), which only the
+    // Cactarium can tell; an empty list is never right.
+    assert!(dep("target = \"et/cactus\"").is_ok());
+    let err = dep("target = \"et/cactus\"\nneeds = []").unwrap_err().to_string();
+    assert!(err.contains("leave needs out"), "{err}");
     for bad in [
         "target = \"et/carpetx/Loop\"",
         "target = \"et/carpetx@head\"",
@@ -542,7 +542,7 @@ fn any_of_lists_alternatives_each_with_its_needs() {
     for (bad, why) in [
         ("any-of = [{ target = \"et/carpet\", needs = [\"CarpetSlab\"] }]", "one alternative"),
         ("target = \"et/carpet\"\nneeds = [\"CarpetSlab\"]\nany-of = [{ target = \"et/a\", needs = [\"A\"] }, { target = \"et/b\", needs = [\"B\"] }]", "both a target and an any-of"),
-        ("any-of = [{ target = \"et/a\" }, { target = \"et/b\", needs = [\"B\"] }]", "has no needs"),
+        ("any-of = [{ target = \"et/a\", needs = [] }, { target = \"et/b\", needs = [\"B\"] }]", "leave needs out"),
         ("any-of = [{ target = \"et/a\", needs = [\"A\"] }, { target = \"et/a@^1\", needs = [\"A\"] }]", "twice"),
         ("needs = [\"A\"]\nany-of = [{ target = \"et/a\", needs = [\"A\"] }, { target = \"et/b\", needs = [\"B\"] }]", "each alternative gives its own needs"),
         ("note = \"neither\"", "needs a target or an any-of"),
@@ -561,4 +561,32 @@ fn exclude_thorns_leaves_out_what_cannot_build() {
     assert!(err.contains("exclude-thorns leaves out"), "{err}");
     let flesh = Manifest::from_toml("format = 1\n[package]\nname = \"c\"\nowners = [\"o\"]\nflesh = true\nexclude-thorns = [\"X\"]\n");
     assert!(flesh.unwrap_err().to_string().contains("a flesh has no thorns"));
+}
+
+#[test]
+fn a_library_package_is_placed_by_the_package_that_uses_it() {
+    let lib = |extra: &str| format!("format = 1\n[package]\nname = \"fuka\"\nowners = [\"et\"]\nlibrary = true\n{extra}");
+    assert!(Manifest::from_repo_file("cactarium.toml", &lib("")).unwrap().package.unwrap().library);
+    for bad in ["thorns = [\"x\"]\n", "arrangement = \"A\"\n", "root = \"src\"\n", "exclude-thorns = [\"X\"]\n"] {
+        let err = Manifest::from_repo_file("cactarium.toml", &lib(bad)).unwrap_err();
+        assert!(err.to_string().contains("a library has no thorns"), "{bad}: {err}");
+    }
+    assert!(Manifest::from_toml(&lib("flesh = true\n")).unwrap_err().to_string().contains("not both"));
+
+    let dep = |body: &str| Manifest::from_toml(&format!("{HEAD}[[dependency]]\n{body}\n"));
+    let ok = dep("target = \"et/fuka\"\ninto = \"src/fuka\"\nneeded-by = [\"KadathThorn\"]").unwrap();
+    assert_eq!(ok.dependencies[0].into.as_deref(), Some("src/fuka"));
+    assert_eq!(Manifest::from_toml(&ok.to_toml().unwrap()).unwrap(), ok);
+    for (bad, why) in [
+        ("target = \"et/fuka\"\ninto = \"src/fuka\"\nneeds = [\"Fuka\"]", "drop needs"),
+        ("target = \"et/fuka\"\ninto = \"../fuka\"", "inside this package's repo"),
+        ("target = \"et/fuka\"\ninto = \"/opt/fuka\"", "inside this package's repo"),
+        ("target = \"et/fuka\"\ninto = \"\"", "inside this package's repo"),
+        ("into = \"src/fuka\"\nany-of = [{ target = \"et/a\" }, { target = \"et/b\" }]", "not an any-of"),
+    ] {
+        let err = dep(bad).unwrap_err().to_string();
+        assert!(err.contains(why), "{bad}: {err}");
+    }
+    let stack = "format = 1\n[stack]\nname = \"s\"\nowners = [\"o\"]\nextends = [\"et/et@2026.5.0\"]\n[[dependency]]\ntarget = \"et/fuka\"\ninto = \"src/fuka\"\n";
+    assert!(Manifest::from_toml(stack).unwrap_err().to_string().contains("only a [package] places a library"));
 }
