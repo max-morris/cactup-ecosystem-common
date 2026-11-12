@@ -155,7 +155,12 @@ Runs on `cactup add`, `cactup install`, and upgrades, in CactUp; the Cactarium s
 - For each requirement a package's thorns don't meet themselves: the installed thorn that meets it,
   mapped to its registry package and version, becomes a `[[dependency]]` with that thorn in `needs`
   and `needed-by` listing exactly the thorns that need it.
-- **Ranges** default to the release series built with (`~2026.5`); a flag widens them.
+- **Ranges** are patch ranges floored at the version built with: built with et/carpetx 2026.5.1,
+  the claim is `et/carpetx@~2026.5.1` (2026.5.1 or a later 2026.5 patch, never older). Patch
+  releases are trusted to be compatible; a patch that breaks something is excluded with the range
+  syntax (`>=2026.5.1 <2026.5.3 || >2026.5.3 <2026.6.0`) or worked around with a durable override.
+  `--exact` pins the version built with instead, for an upstream not to be trusted. Exactness for
+  reproducing a run lives in sims and stack releases, which pin commits.
 - **Forks are detected:** a repo whose history contains an installed package's frozen commit and
   that has that package's thorns gets `[[fork-of]] target = "<package>@~<series>"`.
 - **What looks suspicious becomes a commented TODO line,** never a claim: an include that reaches
