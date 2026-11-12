@@ -43,3 +43,8 @@ pub use error::{Error, Result};
 pub const SIM_FORMAT: u32 = 3;
 /// The `cactarium.toml` format generation this crate reads and writes.
 pub const MANIFEST_FORMAT: u32 = 1;
+/// The frozen-stack format generation this crate reads: the `format` of a stack release
+/// ([`stack::FrozenStack`]) the Cactarium serves. A client checks a response's `format` against
+/// this before the typed parse, so a release from a newer server says "upgrade" rather than
+/// failing on a key it does not know.
+pub const STACK_FORMAT: u32 = 1;

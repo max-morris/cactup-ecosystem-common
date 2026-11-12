@@ -19,3 +19,8 @@ pub(crate) fn check(text: &str, what: &'static str, oldest: u32, newest: u32) ->
     }
     Ok(found)
 }
+
+/// The generations a format reads, for a message: `1` while there is only one, else `1 to N`.
+pub(crate) fn readable(newest: u32) -> String {
+    if newest <= 1 { "1".to_string() } else { format!("1 to {newest}") }
+}
