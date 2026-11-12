@@ -130,11 +130,21 @@ pub struct ThornInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ClaimInfo {
-    /// `depends-on`, `works-with`, `incompatible-with` or `fork-of`.
+    /// `dependency`, `works-with`, `incompatible-with` or `fork-of`.
     pub kind: String,
     /// `owner/name`.
     pub target: String,
+    /// What followed `@` in the target: a version range (or, failing that, a commit).
     pub range: Option<String>,
+    /// What followed `#` in the target: a commit, full or abbreviated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// A dependency's `needs`: thorns of the target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+    /// A dependency's `needed-by`: thorns of this package; empty means every thorn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needed_by: Vec<String>,
     pub note: Option<String>,
 }
 

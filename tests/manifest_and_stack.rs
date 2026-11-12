@@ -18,9 +18,14 @@ description = "CCTK_REAL4/REAL2 storage; needs a mixed-precision flesh"
 [[fork-of]]
 target = "einsteintoolkit/carpetx"
 
-[[depends-on]]
-target = "max-morris/cactus"
-range = "mixed-precision:^1"
+[[dependency]]
+target = "max-morris/cactus@mixed-precision:^1"
+
+[[dependency]]
+target = "einsteintoolkit/amrex#0123abcd"
+needs = ["AMReX"]
+needed-by = ["CarpetX", "TestReal2"]
+note = "a pinned AMReX build"
 
 [[works-with]]
 target = "max-morris/carpetx-mp"
@@ -41,9 +46,56 @@ fn package_manifest_parses_and_round_trips() {
     let m = Manifest::from_toml(PACKAGE).unwrap();
     let p = m.package.as_ref().unwrap();
     assert_eq!(p.owners[0].as_str(), "max-morris");
-    let dep = &m.depends_on[0];
-    assert!(dep.range.as_ref().unwrap().matches(&"mixed-precision:1.3.0".parse().unwrap()));
+    let dep = &m.dependencies[0];
+    assert!(dep.target.req().unwrap().matches(&"mixed-precision:1.3.0".parse().unwrap()));
+    assert!(dep.needs.is_empty() && dep.needed_by.is_empty());
+    let pin = &m.dependencies[1];
+    assert_eq!(pin.target.sha(), Some("0123abcd"));
+    assert_eq!(pin.needs, ["AMReX"]);
+    assert_eq!(pin.needed_by, ["CarpetX", "TestReal2"]);
+    assert_eq!(m.works_with[0].target.to_string(), "max-morris/carpetx-mp@^1");
     assert_eq!(Manifest::from_toml(&m.to_toml().unwrap()).unwrap(), m);
+}
+
+const HEAD: &str = "format = 1\n[package]\nname = \"p\"\nowners = [\"o\"]\n";
+
+#[test]
+fn claims_from_before_inline_ranges_still_read() {
+    // A published tag (et/cottonmouth v2026.5.0) gives the range as its own key.
+    let old = format!("{HEAD}[[works-with]]\ntarget = \"et/cottonmouth-stack\"\nrange = \"^2026.5\"\n");
+    let m = Manifest::from_toml(&old).unwrap();
+    assert_eq!(m.works_with[0].target.to_string(), "et/cottonmouth-stack@^2026.5");
+    let written = m.to_toml().unwrap();
+    assert!(written.contains("target = \"et/cottonmouth-stack@^2026.5\"") && !written.contains("range"), "{written}");
+
+    let both = format!("{HEAD}[[incompatible-with]]\ntarget = \"et/et@^2026\"\nrange = \"^2026.5\"\n");
+    assert!(Manifest::from_toml(&both).is_err());
+}
+
+#[test]
+fn dependency_targets_and_thorn_lists_are_checked() {
+    let dep = |body: &str| Manifest::from_toml(&format!("{HEAD}[[dependency]]\n{body}\n"));
+    assert!(dep("target = \"et/carpetx\"").is_ok());
+    assert!(dep("target = \"et/carpetx@^2026.5\"\nneeds = [\"CarpetX\", \"Loop\"]").is_ok());
+    assert!(dep("target = \"et/carpetx#2bb7f9bc10d7\"").is_ok());
+    for bad in [
+        "target = \"et/carpetx/Loop\"",
+        "target = \"et/carpetx@head\"",
+        "target = \"et/carpetx@not a range\"",
+        "target = \"et/carpetx\"\nneeds = [\"1Loop\"]",
+        "target = \"et/carpetx\"\nneeds = [\"Loop\", \"loop\"]",
+        "target = \"et/carpetx\"\nrange = \"^2026.5\"",
+        "target = \"et/carpetx\"\noptional = true",
+    ] {
+        assert!(dep(bad).is_err(), "{bad} should be rejected");
+    }
+
+    // needed-by names this package's thorns: only a package has them, and a listed set is checked.
+    let listed = "format = 1\n[package]\nname = \"p\"\nowners = [\"o\"]\nthorns = [\"A\", \"B\"]\n";
+    assert!(Manifest::from_toml(&format!("{listed}[[dependency]]\ntarget = \"et/x\"\nneeded-by = [\"B\"]\n")).is_ok());
+    assert!(Manifest::from_toml(&format!("{listed}[[dependency]]\ntarget = \"et/x\"\nneeded-by = [\"C\"]\n")).is_err());
+    let stack = "format = 1\n[stack]\nname = \"s\"\nowners = [\"o\"]\nextends = [\"et/et@2026.5.0\"]\n[[dependency]]\ntarget = \"et/x\"\nneeded-by = [\"A\"]\n";
+    assert!(Manifest::from_toml(stack).is_err());
 }
 
 /// The carpetx-mp-forks case: ET with nine repos redirected to forks, two thorns added.
@@ -168,9 +220,11 @@ fn manifest_validation() {
     let neither = "format = 1\n";
     assert!(invalid(neither).contains("[package], [stack] or [sim]"));
 
-    let versioned_target = PACKAGE
-        .replace("target = \"max-morris/carpetx-mp\"", "target = \"max-morris/carpetx-mp@1.0.0\"");
-    assert!(invalid(&versioned_target).contains("just owner/name"));
+    let thorn_target = PACKAGE
+        .replace("target = \"max-morris/carpetx-mp\"", "target = \"max-morris/carpetx-mp/TestReal4\"");
+    assert!(invalid(&thorn_target).contains("names a thorn"));
+    let thorn_fork = PACKAGE.replace("target = \"einsteintoolkit/carpetx\"", "target = \"einsteintoolkit/carpetx/CarpetX\"");
+    assert!(invalid(&thorn_fork).contains("names a thorn"));
 
     let no_owners = "format = 1\n[package]\nname = \"x\"\nowners = []\n";
     assert!(invalid(no_owners).contains("owners is empty"));
@@ -389,5 +443,64 @@ fn slugs_name_commits() {
     assert!("et/cottonmouth@deadbeef".parse::<Slug>().unwrap().req().is_ok(), "reads as a track first");
     for not in ["et/cottonmouth@1.2.3", "et/cottonmouth@head", "et/cottonmouth@beef12"] {
         assert_eq!(not.parse::<Slug>().unwrap().commit_fallback(), None, "{not}");
+    }
+}
+
+#[test]
+fn fork_of_takes_a_range_or_a_commit_and_stands_in_where_they_overlap() {
+    use cactup_ecosystem_common::manifest::ForkOf;
+    use cactup_ecosystem_common::version::TrackedVersion;
+    let fork = |t: &str| ForkOf { target: t.parse().unwrap(), note: None };
+    let slug = |s: &str| s.parse::<cactup_ecosystem_common::slug::Slug>().unwrap();
+    let published: Vec<(TrackedVersion, Option<String>)> = [
+        ("2026.5.0", "aaaaaaa1111"),
+        ("2026.5.1", "bbbbbbb2222"),
+        ("2026.11.0", "ccccccc3333"),
+    ]
+    .iter()
+    .map(|(v, c)| (v.parse().unwrap(), Some((*c).to_owned())))
+    .collect();
+
+    // A fork of the 2026.5 series.
+    let f = fork("et/carpet@~2026.5");
+    assert!(f.stands_in_for(&slug("et/carpet@^2026.5"), &published), "overlap at 2026.5.x");
+    assert!(f.stands_in_for(&slug("et/carpet@2026.5.1"), &published), "a sim's exact pin inside the range");
+    assert!(!f.stands_in_for(&slug("et/carpet@2026.11.0"), &published), "outside the fork's range");
+    assert!(!f.stands_in_for(&slug("et/carpet@>=2027"), &published), "no published version in both");
+    assert!(!f.stands_in_for(&slug("et/carpetx@^2026.5"), &published), "another package");
+    assert!(!f.stands_in_for(&slug("et/carpet#aaaaaaa"), &published), "a commit dependency needs a fork of that commit");
+
+    // A bare fork-of covers every version on the default track.
+    assert!(fork("et/carpet").stands_in_for(&slug("et/carpet@2026.11.0"), &published));
+
+    // A fork of one commit stands in for that commit's version and that commit.
+    let c = fork("et/carpet#bbbbbbb");
+    assert!(c.stands_in_for(&slug("et/carpet@^2026.5"), &published));
+    assert!(c.stands_in_for(&slug("et/carpet#bbbbbbb2222"), &published));
+    assert!(!c.stands_in_for(&slug("et/carpet@2026.5.0"), &published));
+
+    // In a manifest: ranges and commits are accepted, thorns are not.
+    let m = |target: &str| {
+        format!(
+            "format = 1\n[package]\nname = \"carpet\"\nowners = [\"steve\"]\n\n[[fork-of]]\ntarget = \"{target}\"\n"
+        )
+    };
+    for ok in ["et/carpet", "et/carpet@~2026.5", "et/carpet@>=2026.5.0 <2026.11", "et/carpet#abc1234"] {
+        Manifest::from_repo_file("cactarium.toml", &m(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    let err = Manifest::from_repo_file("cactarium.toml", &m("et/carpet/CarpetLib")).unwrap_err();
+    assert!(err.to_string().contains("names a thorn"), "{err}");
+}
+
+#[test]
+fn a_package_root_is_a_folder_inside_the_repo() {
+    let m = |root: &str| {
+        format!("format = 1\n[package]\nname = \"kranc\"\nowners = [\"et\"]\nroot = \"{root}\"\n")
+    };
+    let ok = Manifest::from_repo_file("cactarium.toml", &m("Auxiliary/Cactus")).unwrap();
+    assert_eq!(ok.package.unwrap().root.as_deref(), Some("Auxiliary/Cactus"));
+    for bad in ["", "../elsewhere", "/abs", "a/../../b", "./x"] {
+        let err = Manifest::from_repo_file("cactarium.toml", &m(bad)).unwrap_err();
+        assert!(err.to_string().contains("folder inside the repo"), "{bad}: {err}");
     }
 }
