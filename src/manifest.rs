@@ -101,6 +101,11 @@ pub struct PackageSection {
     /// `Auxiliary/Cactus`. Default: the repo root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
+    /// Thorns the repo has but that aren't published, because they can't build: the Cactarium
+    /// hosts only what works as delivered. CarpetIOF5 needs an F5 library nothing provides, for
+    /// example. Not with `thorns`, which lists what is published instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude_thorns: Vec<String>,
     /// The thorns to publish, by directory name. Default: every directory with an interface.ccl.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thorns: Option<Vec<String>>,
@@ -215,18 +220,60 @@ impl ForkOf {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Dependency {
-    /// `owner/name`, `owner/name@<range>` or `owner/name#<sha>`. No `@`: every version on the
-    /// default track.
-    pub target: Slug,
-    /// Thorns of the target that are needed whatever the CCL says. Empty: whichever of its thorns
-    /// the CCL requirements of the `needed-by` thorns resolve to.
+    /// The package depended on: `owner/name`, `owner/name@<range>` or `owner/name#<sha>`. No `@`:
+    /// every version on the default track. Exactly one of `target` and `any-of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<Slug>,
+    /// The thorns of `target` this package uses. Required in a `[package]`: the CCL says what a
+    /// thorn needs, this says which thorn of which package supplies it, and the Cactarium checks
+    /// that the two agree (every hard CCL requirement of a published thorn is met by the package
+    /// itself or a dependency's `needs`). `needs = []` names no thorns: only for a target with none, a
+    /// flesh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<Vec<String>>,
+    /// Interchangeable packages, each with the thorns it supplies, in the author's order of
+    /// preference: any one of them meets the dependency. A resolver takes one already installed,
+    /// else one the rest of the plan brings in, else the first that conflicts with nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub needs: Vec<String>,
+    pub any_of: Vec<Alternative>,
     /// Thorns of this package the dependency is for. Empty: every thorn. Only in a `[package]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needed_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// One of a dependency's interchangeable packages (`any-of`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Alternative {
+    /// `owner/name`, `owner/name@<range>` or `owner/name#<sha>`.
+    pub target: Slug,
+    /// The thorns of this alternative that the package uses (`[]` only for a flesh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs: Option<Vec<String>>,
+}
+
+impl Dependency {
+    /// Each package the dependency may be met by, with its `needs`: the target, or every
+    /// alternative.
+    pub fn options(&self) -> Vec<(&Slug, Option<&[String]>)> {
+        match &self.target {
+            Some(t) => vec![(t, self.needs.as_deref())],
+            None => self.any_of.iter().map(|a| (&a.target, a.needs.as_deref())).collect(),
+        }
+    }
+
+    /// The dependency as people read it: `et/carpet`, or `any of et/carpet, et/cactuspugh`.
+    pub fn label(&self) -> String {
+        match &self.target {
+            Some(t) => t.to_string(),
+            None => format!(
+                "any of {}",
+                self.any_of.iter().map(|a| a.target.to_string()).collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
 }
 
 /// A declared relation to another package or stack (`[[works-with]]`, `[[incompatible-with]]`):
@@ -310,6 +357,33 @@ fn versioned_target(t: &Slug) -> Result<()> {
     t.req().map(|_| ())
 }
 
+/// A `needed-by` list: thorn names, of this package (only a `[package]` has thorns).
+fn thorn_names_of_this_package(package: &Option<PackageSection>, what: &str, of: &str, thorns: &[String]) -> Result<()> {
+    if thorns.is_empty() {
+        return Ok(());
+    }
+    let Some(p) = package else {
+        return Err(Error::invalid(format!("{what} of {of} names thorns, but only a [package] has thorns")));
+    };
+    for (i, t) in thorns.iter().enumerate() {
+        if !crate::slug::valid_thorn(t) {
+            return Err(Error::invalid(format!("'{t}' in {what} of {of} is not a thorn name")));
+        }
+        if thorns[..i].iter().any(|u| u.eq_ignore_ascii_case(t)) {
+            return Err(Error::invalid(format!("'{t}' is listed twice in {what} of {of}")));
+        }
+        if let Some(own) = &p.thorns
+            && !own.contains(t)
+        {
+            return Err(Error::invalid(format!("{what} of {of} names '{t}', which is not one of this package's thorns")));
+        }
+        if p.exclude_thorns.contains(t) {
+            return Err(Error::invalid(format!("{what} of {of} names '{t}', which exclude-thorns leaves out")));
+        }
+    }
+    Ok(())
+}
+
 fn thorn_list(what: &str, target: &Slug, thorns: &[String]) -> Result<()> {
     for (i, t) in thorns.iter().enumerate() {
         if !crate::slug::valid_thorn(t) {
@@ -375,10 +449,20 @@ impl Manifest {
             }
             (None, None, Some(s)) => s.validate()?,
             (Some(p), None, None) => {
-                if p.flesh && (p.thorns.is_some() || p.arrangement.is_some() || p.root.is_some()) {
+                if p.flesh && (p.thorns.is_some() || p.arrangement.is_some() || p.root.is_some() || !p.exclude_thorns.is_empty()) {
                     return Err(Error::invalid(
-                        "[package] flesh = true: a flesh has no thorns, so no thorns, arrangement or root",
+                        "[package] flesh = true: a flesh has no thorns, so no thorns, exclude-thorns, arrangement or root",
                     ));
+                }
+                if p.thorns.is_some() && !p.exclude_thorns.is_empty() {
+                    return Err(Error::invalid(
+                        "[package] gives both thorns (what is published) and exclude-thorns (what isn't); use one",
+                    ));
+                }
+                for (i, t) in p.exclude_thorns.iter().enumerate() {
+                    if !crate::slug::valid_thorn(t) || p.exclude_thorns[..i].contains(t) {
+                        return Err(Error::invalid(format!("exclude-thorns: '{t}' is not a thorn name, or is listed twice")));
+                    }
                 }
                 if p.owners.is_empty() {
                     return Err(Error::invalid("[package] owners is empty"));
@@ -413,26 +497,40 @@ impl Manifest {
             versioned_target(&c.target)?;
         }
         for d in &self.dependencies {
-            versioned_target(&d.target)?;
-            thorn_list("needs", &d.target, &d.needs)?;
-            thorn_list("needed-by", &d.target, &d.needed_by)?;
-            if d.needed_by.is_empty() {
-                continue;
+            match (&d.target, d.any_of.len()) {
+                (Some(_), 0) => {}
+                (None, 0) => return Err(Error::invalid("a [[dependency]] needs a target or an any-of")),
+                (Some(t), _) => {
+                    return Err(Error::invalid(format!("the dependency on '{t}' has both a target and an any-of")));
+                }
+                (None, 1) => {
+                    return Err(Error::invalid(format!(
+                        "the dependency on {} has one alternative in any-of; give it as target",
+                        d.label()
+                    )));
+                }
+                (None, _) if d.needs.is_some() => {
+                    return Err(Error::invalid(format!(
+                        "the dependency on {}: with any-of, each alternative gives its own needs",
+                        d.label()
+                    )));
+                }
+                (None, _) => {}
             }
-            let Some(p) = &self.package else {
-                return Err(Error::invalid(format!(
-                    "needed-by in the dependency on '{}' names thorns, but only a [package] has thorns",
-                    d.target
-                )));
-            };
-            if let Some(own) = &p.thorns
-                && let Some(t) = d.needed_by.iter().find(|t| !own.contains(t))
-            {
-                return Err(Error::invalid(format!(
-                    "needed-by in the dependency on '{}' names '{t}', which is not one of this package's thorns",
-                    d.target
-                )));
+            for (i, (target, needs)) in d.options().into_iter().enumerate() {
+                versioned_target(target)?;
+                thorn_list("needs", target, needs.unwrap_or_default())?;
+                if self.package.is_some() && needs.is_none() {
+                    return Err(Error::invalid(format!(
+                        "the dependency on '{target}' has no needs: name the thorns of {target} this package uses \
+                         (needs = [] only when it has none, as a flesh)"
+                    )));
+                }
+                if d.options()[..i].iter().any(|(t, _)| t.owner == target.owner && t.name == target.name) {
+                    return Err(Error::invalid(format!("{} lists '{target}' twice", d.label())));
+                }
             }
+            thorn_names_of_this_package(&self.package, "needed-by", &d.label(), &d.needed_by)?;
         }
         Ok(())
     }

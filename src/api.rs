@@ -145,7 +145,23 @@ pub struct ClaimInfo {
     /// A dependency's `needed-by`: thorns of this package; empty means every thorn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needed_by: Vec<String>,
+    /// An `any-of` dependency's alternatives, in the author's order (`target`, `range`, `sha` and
+    /// `needs` above then repeat the first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<AlternativeInfo>,
     pub note: Option<String>,
+}
+
+/// One alternative of an `any-of` dependency.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AlternativeInfo {
+    /// `owner/name`.
+    pub target: String,
+    pub range: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    pub needs: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

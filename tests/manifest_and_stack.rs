@@ -20,6 +20,7 @@ target = "einsteintoolkit/carpetx"
 
 [[dependency]]
 target = "max-morris/cactus@mixed-precision:^1"
+needs = []
 
 [[dependency]]
 target = "einsteintoolkit/amrex#0123abcd"
@@ -47,11 +48,11 @@ fn package_manifest_parses_and_round_trips() {
     let p = m.package.as_ref().unwrap();
     assert_eq!(p.owners[0].as_str(), "max-morris");
     let dep = &m.dependencies[0];
-    assert!(dep.target.req().unwrap().matches(&"mixed-precision:1.3.0".parse().unwrap()));
-    assert!(dep.needs.is_empty() && dep.needed_by.is_empty());
+    assert!(dep.target.as_ref().unwrap().req().unwrap().matches(&"mixed-precision:1.3.0".parse().unwrap()));
+    assert!(dep.needs.as_deref() == Some(&[][..]) && dep.needed_by.is_empty(), "a flesh: needs = []");
     let pin = &m.dependencies[1];
-    assert_eq!(pin.target.sha(), Some("0123abcd"));
-    assert_eq!(pin.needs, ["AMReX"]);
+    assert_eq!(pin.target.as_ref().unwrap().sha(), Some("0123abcd"));
+    assert_eq!(pin.needs.as_deref(), Some(&["AMReX".to_owned()][..]));
     assert_eq!(pin.needed_by, ["CarpetX", "TestReal2"]);
     assert_eq!(m.works_with[0].target.to_string(), "max-morris/carpetx-mp@^1");
     assert_eq!(Manifest::from_toml(&m.to_toml().unwrap()).unwrap(), m);
@@ -75,9 +76,13 @@ fn claims_from_before_inline_ranges_still_read() {
 #[test]
 fn dependency_targets_and_thorn_lists_are_checked() {
     let dep = |body: &str| Manifest::from_toml(&format!("{HEAD}[[dependency]]\n{body}\n"));
-    assert!(dep("target = \"et/carpetx\"").is_ok());
+    assert!(dep("target = \"et/carpetx\"\nneeds = [\"CarpetX\"]").is_ok());
     assert!(dep("target = \"et/carpetx@^2026.5\"\nneeds = [\"CarpetX\", \"Loop\"]").is_ok());
-    assert!(dep("target = \"et/carpetx#2bb7f9bc10d7\"").is_ok());
+    assert!(dep("target = \"et/carpetx#2bb7f9bc10d7\"\nneeds = [\"Loop\"]").is_ok());
+    // In a [package], needs is required; [] only for a target with no thorns (a flesh).
+    let err = dep("target = \"et/carpetx\"").unwrap_err().to_string();
+    assert!(err.contains("has no needs"), "{err}");
+    assert!(dep("target = \"et/cactus\"\nneeds = []").is_ok());
     for bad in [
         "target = \"et/carpetx/Loop\"",
         "target = \"et/carpetx@head\"",
@@ -92,8 +97,8 @@ fn dependency_targets_and_thorn_lists_are_checked() {
 
     // needed-by names this package's thorns: only a package has them, and a listed set is checked.
     let listed = "format = 1\n[package]\nname = \"p\"\nowners = [\"o\"]\nthorns = [\"A\", \"B\"]\n";
-    assert!(Manifest::from_toml(&format!("{listed}[[dependency]]\ntarget = \"et/x\"\nneeded-by = [\"B\"]\n")).is_ok());
-    assert!(Manifest::from_toml(&format!("{listed}[[dependency]]\ntarget = \"et/x\"\nneeded-by = [\"C\"]\n")).is_err());
+    assert!(Manifest::from_toml(&format!("{listed}[[dependency]]\ntarget = \"et/x\"\nneeds = [\"X\"]\nneeded-by = [\"B\"]\n")).is_ok());
+    assert!(Manifest::from_toml(&format!("{listed}[[dependency]]\ntarget = \"et/x\"\nneeds = [\"X\"]\nneeded-by = [\"C\"]\n")).is_err());
     let stack = "format = 1\n[stack]\nname = \"s\"\nowners = [\"o\"]\nextends = [\"et/et@2026.5.0\"]\n[[dependency]]\ntarget = \"et/x\"\nneeded-by = [\"A\"]\n";
     assert!(Manifest::from_toml(stack).is_err());
 }
@@ -524,4 +529,36 @@ fn a_flesh_package_has_no_thorns() {
     // A mixed-precision flesh forks et/cactus.
     let fork = m("\n[[fork-of]]\ntarget = \"et/cactus@~2026.5\"\n").replace("name = \"cactus\"", "name = \"cactus-mp\"");
     assert_eq!(Manifest::from_repo_file("cactarium.toml", &fork).unwrap().fork_of.len(), 1);
+}
+
+#[test]
+fn any_of_lists_alternatives_each_with_its_needs() {
+    let dep = |body: &str| Manifest::from_toml(&format!("{HEAD}[[dependency]]\n{body}\nneeded-by = [\"IOASCII\"]\n"));
+    let ok = dep("any-of = [{ target = \"et/carpet\", needs = [\"CarpetSlab\"] }, { target = \"et/cactuspugh@^2026.5\", needs = [\"PUGHSlab\"] }]").unwrap();
+    let d = &ok.dependencies[0];
+    assert_eq!(d.label(), "any of et/carpet, et/cactuspugh@^2026.5");
+    assert_eq!(d.options().len(), 2);
+    assert_eq!(Manifest::from_toml(&ok.to_toml().unwrap()).unwrap(), ok);
+    for (bad, why) in [
+        ("any-of = [{ target = \"et/carpet\", needs = [\"CarpetSlab\"] }]", "one alternative"),
+        ("target = \"et/carpet\"\nneeds = [\"CarpetSlab\"]\nany-of = [{ target = \"et/a\", needs = [\"A\"] }, { target = \"et/b\", needs = [\"B\"] }]", "both a target and an any-of"),
+        ("any-of = [{ target = \"et/a\" }, { target = \"et/b\", needs = [\"B\"] }]", "has no needs"),
+        ("any-of = [{ target = \"et/a\", needs = [\"A\"] }, { target = \"et/a@^1\", needs = [\"A\"] }]", "twice"),
+        ("needs = [\"A\"]\nany-of = [{ target = \"et/a\", needs = [\"A\"] }, { target = \"et/b\", needs = [\"B\"] }]", "each alternative gives its own needs"),
+        ("note = \"neither\"", "needs a target or an any-of"),
+    ] {
+        let err = dep(bad).unwrap_err().to_string();
+        assert!(err.contains(why), "{bad}: {err}");
+    }
+}
+
+#[test]
+fn exclude_thorns_leaves_out_what_cannot_build() {
+    let m = |extra: &str| Manifest::from_toml(&format!("{HEAD}exclude-thorns = [\"CarpetIOF5\"]\n{extra}"));
+    assert_eq!(m("").unwrap().package.unwrap().exclude_thorns, ["CarpetIOF5"]);
+    assert!(m("thorns = [\"Carpet\"]\n").unwrap_err().to_string().contains("use one"));
+    let err = m("[[dependency]]\ntarget = \"et/hdf5\"\nneeds = [\"HDF5\"]\nneeded-by = [\"CarpetIOF5\"]\n").unwrap_err().to_string();
+    assert!(err.contains("exclude-thorns leaves out"), "{err}");
+    let flesh = Manifest::from_toml("format = 1\n[package]\nname = \"c\"\nowners = [\"o\"]\nflesh = true\nexclude-thorns = [\"X\"]\n");
+    assert!(flesh.unwrap_err().to_string().contains("a flesh has no thorns"));
 }
