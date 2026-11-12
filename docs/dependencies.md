@@ -46,8 +46,12 @@ needed-by = ["IOASCII"]
 - `target` without `@` means any version on the target's default track. Ranges use npm syntax
   (`^`, `~`, comparators, spaces for AND, hyphen ranges, `||` for OR; a track prefix on every
   alternative or on none). `#<sha>` pins one commit.
-- **`needs` is required in a `[package]`.** `needs = []` names no thorns: only for a target that
-  has none, a flesh. In a `[stack]` (whose own thornlist names its thorns) it is optional.
+- **`needs` is required in a `[package]` when the target has thorns,** and left out when it has
+  none (a flesh or a library). Only the Cactarium knows which a target is, so it enforces this at
+  publish; `needs = []` is never accepted. In a `[stack]` (whose own thornlist names its thorns)
+  `needs` is optional.
+- **`into`**, for a library target only: where the library's checkout goes, relative to this
+  package's repo root. Not with `needs` or `any-of`; only in a `[package]`.
 - **`any-of`** replaces `target`: at least two packages, each with its own `needs`.
 - `needed-by` names thorns this package publishes; it can't name an excluded thorn.
 - A package's dependencies target packages; a stack is named with `[[works-with]]`.
@@ -63,6 +67,27 @@ published instead. A name the commit doesn't have is refused.
 The package is a Cactus flesh (`et/cactus`, or a fork such as a mixed-precision flesh) rather than
 thorns: checked for `src/main/flesh.cc` and `lib/sbin/CST`, no thorns, and `flesh: true` in the
 API. A flesh fork declares `[[fork-of]] target = "et/cactus@…"`.
+
+### `[package] library = true`
+
+The package is a library that thorns build against rather than thorns or a flesh: FUKA, which
+KadathThorn builds from source. It has no thorns and nothing in it is checked for CCL. Being a
+package gives the library an identity, so a sim or stack that checks it out pins a registered
+package like any other repo.
+
+Where the library goes is a fact about the package that uses it (KadathThorn's `src/build.sh`
+builds FUKA from `src/fuka`), so that package says it:
+
+```toml
+[[dependency]]
+target = "et/fuka"
+into = "src/fuka"
+needed-by = ["KadathThorn"]
+```
+
+CactUp, composing a thornlist from packages (`cactup add et/kadaththorn`), writes the library's
+checkout with `!TARGET` at that folder of the dependent package's checkout. A sim or stack carries
+its own thornlist, whose `!TARGET` already places the library; there `into` is not consulted.
 
 ### `[[fork-of]]`
 
@@ -101,7 +126,8 @@ from the Cactarium alone. The flesh pin is `et/cactus` (or a fork of it).
 A package version is refused unless:
 
 - each dependency's target (every alternative of an `any-of`) has a version on the Cactarium in
-  range, or at the commit, that has the `needs` thorns (`needs = []` only for a flesh);
+  range, or at the commit, that has the `needs` thorns;
+- `needs` is given exactly when the target has thorns, and `into` exactly when it is a library;
 - **every hard CCL requirement of every published thorn** is met by the package's own thorns or by
   the `needs` thorns of a dependency that applies to that thorn (its `needed-by` includes the thorn,
   or is empty); for an `any-of`, by every alternative.
@@ -123,8 +149,8 @@ Runs on `cactup add`, `cactup install`, and upgrades, in CactUp; the Cactarium s
 (versions, their dependencies and fork-of declarations, per-thorn CCL facts).
 
 1. **What is installed stays fixed** unless `--upgrade` is given.
-2. **Transitive closure** over `[[dependency]]`: install the `needs` thorns of each dependency, then
-   those thorns' own package's dependencies, and so on. Ranges are intersected with what is
+2. **Transitive closure** over `[[dependency]]`: install the `needs` thorns of each dependency (a
+   library: its checkout, at `into`), then those thorns' own package's dependencies, and so on. Ranges are intersected with what is
    already chosen; tracks are honored; `#sha` pins are exact.
 3. **`any-of`**, in this order: an alternative already installed; else one the rest of the plan
    already brings in; else, among those that conflict with nothing installed or planned, the first

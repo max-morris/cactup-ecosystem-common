@@ -142,6 +142,9 @@ pub struct ClaimInfo {
     /// A dependency's `needs`: thorns of the target.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
+    /// A dependency on a library: where its checkout goes, relative to this package's repo root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
     /// A dependency's `needed-by`: thorns of this package; empty means every thorn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needed_by: Vec<String>,
@@ -174,6 +177,10 @@ pub struct PackageVersion {
     /// repo is checked out as the Cactus root.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flesh: bool,
+    /// A library that thorns build against rather than thorns (`thorns` is empty): a dependency
+    /// on it says where the checkout goes (`into` in [`ClaimInfo`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub library: bool,
     pub thorns: Vec<ThornInfo>,
     pub claims: Vec<ClaimInfo>,
 }

@@ -16,7 +16,9 @@
 //! never repeats the CCL. Its `target` is `owner/pkg`, `owner/pkg@<range>` or `owner/pkg#<sha>`;
 //! `needs` names thorns of the target that are needed whatever the CCL says (to choose among
 //! providers, or for a need the CCL can't express), and `needed-by` names the thorns of this
-//! package the dependency is for (default: every thorn).
+//! package the dependency is for (default: every thorn). A dependency on a library (a package
+//! with `library = true`, which has no thorns) gives `into` instead of `needs`: where its checkout
+//! goes in this package's repo.
 //!
 //! Admins use the same schema for the overlay manifest of a curated package, i.e. one whose
 //! upstream repo has no `cactarium.toml` of its own.
@@ -96,6 +98,12 @@ pub struct PackageSection {
     /// thorns, so no `thorns`, `arrangement` or `root`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub flesh: bool,
+    /// The package is a library that thorns build against (FUKA, which KadathThorn builds from
+    /// source) rather than thorns or a flesh: nothing in it is checked for CCL, and it has no
+    /// `thorns`, `exclude-thorns`, `arrangement` or `root`. A package that uses it says where its
+    /// checkout goes with `into` on the dependency.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub library: bool,
     /// Where the thorns are, relative to the repo root, when not at it: the folder holding the
     /// `Arrangement/Thorn/` (or `Thorn/`) directories. Kranc keeps its thorns under
     /// `Auxiliary/Cactus`. Default: the repo root.
@@ -224,13 +232,19 @@ pub struct Dependency {
     /// every version on the default track. Exactly one of `target` and `any-of`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<Slug>,
-    /// The thorns of `target` this package uses. Required in a `[package]`: the CCL says what a
+    /// The thorns of `target` this package uses. Required in a `[package]` whose target has thorns
+    /// (the Cactarium, which knows the target, refuses a version without it): the CCL says what a
     /// thorn needs, this says which thorn of which package supplies it, and the Cactarium checks
     /// that the two agree (every hard CCL requirement of a published thorn is met by the package
-    /// itself or a dependency's `needs`). `needs = []` names no thorns: only for a target with none, a
-    /// flesh.
+    /// itself or a dependency's `needs`). Left out for a target with no thorns: a flesh or a
+    /// library.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<Vec<String>>,
+    /// For a library target: where its checkout goes, relative to this package's repo root
+    /// (`src/fuka` for KadathThorn, whose build looks there). Required for a library, refused for
+    /// anything else; not with `needs` or `any-of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into: Option<String>,
     /// Interchangeable packages, each with the thorns it supplies, in the author's order of
     /// preference: any one of them meets the dependency. A resolver takes one already installed,
     /// else one the rest of the plan brings in, else the first that conflicts with nothing.
@@ -249,7 +263,7 @@ pub struct Dependency {
 pub struct Alternative {
     /// `owner/name`, `owner/name@<range>` or `owner/name#<sha>`.
     pub target: Slug,
-    /// The thorns of this alternative that the package uses (`[]` only for a flesh).
+    /// The thorns of this alternative that the package uses (left out only for a flesh).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub needs: Option<Vec<String>>,
 }
@@ -384,6 +398,12 @@ fn thorn_names_of_this_package(package: &Option<PackageSection>, what: &str, of:
     Ok(())
 }
 
+/// A folder inside the repo, given relative to its root: `Auxiliary/Cactus`, `src/fuka`.
+fn inside_repo(path: &str) -> bool {
+    let plain = std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)));
+    !path.trim().is_empty() && plain
+}
+
 fn thorn_list(what: &str, target: &Slug, thorns: &[String]) -> Result<()> {
     for (i, t) in thorns.iter().enumerate() {
         if !crate::slug::valid_thorn(t) {
@@ -449,9 +469,18 @@ impl Manifest {
             }
             (None, None, Some(s)) => s.validate()?,
             (Some(p), None, None) => {
-                if p.flesh && (p.thorns.is_some() || p.arrangement.is_some() || p.root.is_some() || !p.exclude_thorns.is_empty()) {
+                if p.flesh && p.library {
+                    return Err(Error::invalid("[package] is a flesh or a library, not both"));
+                }
+                let thornless = p.thorns.is_some() || p.arrangement.is_some() || p.root.is_some() || !p.exclude_thorns.is_empty();
+                if p.flesh && thornless {
                     return Err(Error::invalid(
                         "[package] flesh = true: a flesh has no thorns, so no thorns, exclude-thorns, arrangement or root",
+                    ));
+                }
+                if p.library && thornless {
+                    return Err(Error::invalid(
+                        "[package] library = true: a library has no thorns, so no thorns, exclude-thorns, arrangement or root",
                     ));
                 }
                 if p.thorns.is_some() && !p.exclude_thorns.is_empty() {
@@ -478,14 +507,12 @@ impl Manifest {
                 if let Some(t) = &p.tag_pattern {
                     crate::version::TagPattern::from_str(t)?;
                 }
-                if let Some(r) = &p.root {
-                    let path = std::path::Path::new(r);
-                    let plain = path.components().all(|c| matches!(c, std::path::Component::Normal(_)));
-                    if r.trim().is_empty() || !plain {
-                        return Err(Error::invalid(format!(
-                            "[package] root '{r}' must be a folder inside the repo, like \"Auxiliary/Cactus\""
-                        )));
-                    }
+                if let Some(r) = &p.root
+                    && !inside_repo(r)
+                {
+                    return Err(Error::invalid(format!(
+                        "[package] root '{r}' must be a folder inside the repo, like \"Auxiliary/Cactus\""
+                    )));
                 }
             }
             (None, Some(s), None) => s.validate()?,
@@ -517,15 +544,39 @@ impl Manifest {
                 }
                 (None, _) => {}
             }
-            for (i, (target, needs)) in d.options().into_iter().enumerate() {
-                versioned_target(target)?;
-                thorn_list("needs", target, needs.unwrap_or_default())?;
-                if self.package.is_some() && needs.is_none() {
+            if let Some(into) = &d.into {
+                let label = d.label();
+                if !d.any_of.is_empty() {
                     return Err(Error::invalid(format!(
-                        "the dependency on '{target}' has no needs: name the thorns of {target} this package uses \
-                         (needs = [] only when it has none, as a flesh)"
+                        "the dependency on {label}: into (where a library goes) is for a single target, not an any-of"
                     )));
                 }
+                if self.package.is_none() {
+                    return Err(Error::invalid(format!(
+                        "the dependency on '{label}' gives into, but only a [package] places a library; \
+                         a stack's or sim's thornlist says where each checkout goes"
+                    )));
+                }
+                if d.needs.is_some() {
+                    return Err(Error::invalid(format!(
+                        "the dependency on '{label}' gives into, so its target is a library, which has no thorns: drop needs"
+                    )));
+                }
+                if !inside_repo(into) {
+                    return Err(Error::invalid(format!(
+                        "the dependency on '{label}': into '{into}' must be a folder inside this package's repo, like \"src/fuka\""
+                    )));
+                }
+            }
+            for (i, (target, needs)) in d.options().into_iter().enumerate() {
+                versioned_target(target)?;
+                if needs.is_some_and(|n| n.is_empty()) {
+                    return Err(Error::invalid(format!(
+                        "the dependency on '{target}' has needs = []: name the thorns of {target} this package uses, \
+                         or, for a target with none (a flesh or a library), leave needs out"
+                    )));
+                }
+                thorn_list("needs", target, needs.unwrap_or_default())?;
                 if d.options()[..i].iter().any(|(t, _)| t.owner == target.owner && t.name == target.name) {
                     return Err(Error::invalid(format!("{} lists '{target}' twice", d.label())));
                 }
