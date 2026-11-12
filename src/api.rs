@@ -130,12 +130,38 @@ pub struct ThornInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ClaimInfo {
-    /// `depends-on`, `works-with`, `incompatible-with` or `fork-of`.
+    /// `dependency`, `works-with`, `incompatible-with` or `fork-of`.
     pub kind: String,
     /// `owner/name`.
     pub target: String,
+    /// What followed `@` in the target: a version range (or, failing that, a commit).
     pub range: Option<String>,
+    /// What followed `#` in the target: a commit, full or abbreviated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    /// A dependency's `needs`: thorns of the target.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+    /// A dependency's `needed-by`: thorns of this package; empty means every thorn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needed_by: Vec<String>,
+    /// An `any-of` dependency's alternatives, in the author's order (`target`, `range`, `sha` and
+    /// `needs` above then repeat the first).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<AlternativeInfo>,
     pub note: Option<String>,
+}
+
+/// One alternative of an `any-of` dependency.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AlternativeInfo {
+    /// `owner/name`.
+    pub target: String,
+    pub range: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha: Option<String>,
+    pub needs: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +170,10 @@ pub struct PackageVersion {
     #[serde(flatten)]
     pub version: VersionInfo,
     pub url: String,
+    /// A Cactus flesh (et/cactus or a fork of it) rather than thorns: `thorns` is empty, and the
+    /// repo is checked out as the Cactus root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub flesh: bool,
     pub thorns: Vec<ThornInfo>,
     pub claims: Vec<ClaimInfo>,
 }

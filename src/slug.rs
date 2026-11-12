@@ -58,7 +58,7 @@ pub struct Slug {
 /// The shortest abbreviated commit id accepted.
 pub const MIN_COMMIT_PREFIX: usize = 7;
 
-fn valid_thorn(s: &str) -> bool {
+pub(crate) fn valid_thorn(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -93,7 +93,7 @@ impl Slug {
             return Err(Error::invalid(format!("'{self}' names a commit, not a version")));
         }
         match &self.at {
-            None => Ok(TrackedReq { track: None, req: semver::VersionReq::STAR }),
+            None => Ok(TrackedReq::any()),
             Some(at) if at == HEAD || at == MASTER => Err(Error::invalid(format!("'{self}' names unpinned branch tips, not a version"))),
             Some(at) => at.parse(),
         }

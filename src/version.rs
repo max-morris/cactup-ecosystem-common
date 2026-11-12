@@ -116,10 +116,11 @@ impl TrackedVersion {
     }
 }
 
-/// How release tags that aren't `vX.Y.Z` become versions: literal text around `{major}`,
-/// `{minor}` and `{patch}`, each exactly once. `ET_{major}_{minor}_v{patch}` reads the Einstein
-/// Toolkit's `ET_2026_05_v0` as 2026.5.0 (on the default track). A manifest gives it as
-/// `tag-pattern`; with one, only tags it matches are versions.
+/// How release tags that aren't `vX.Y.Z` become versions: literal text around `{major}` and,
+/// optionally, `{minor}` and `{patch}`, each at most once; one left out reads as 0.
+/// `ET_{major}_{minor}_v{patch}` reads the Einstein Toolkit's `ET_2026_05_v0` as 2026.5.0, and
+/// `v{major}.{minor}` reads AsterX's `v1.0` as 1.0.0 (on the default track). A manifest gives it
+/// as `tag-pattern`; with one, only tags it matches are versions.
 #[derive(Clone, Debug)]
 pub struct TagPattern {
     text: String,
@@ -135,7 +136,8 @@ impl TagPattern {
     pub fn version(&self, tag: &str) -> Option<TrackedVersion> {
         let tag = tag.strip_prefix("refs/tags/").unwrap_or(tag);
         let c = self.re.captures(tag)?;
-        let n = |k: &str| c[k].parse::<u64>().ok();
+        // A part the pattern leaves out reads as 0.
+        let n = |k: &str| c.name(k).map_or(Some(0), |m| m.as_str().parse::<u64>().ok());
         Some(TrackedVersion { track: None, version: semver::Version::new(n("major")?, n("minor")?, n("patch")?) })
     }
 }
@@ -167,8 +169,11 @@ impl FromStr for TagPattern {
         }
         re.push_str(&regex::escape(rest));
         re.push('$');
-        if seen.len() != 3 {
-            return Err(bad("needs {major}, {minor} and {patch}"));
+        if !seen.contains(&"major") {
+            return Err(bad("needs {major} ({minor} and {patch} may be left out, reading as 0)"));
+        }
+        if seen.contains(&"patch") && !seen.contains(&"minor") {
+            return Err(bad("{patch} needs {minor}"));
         }
         let re = regex::Regex::new(&re).map_err(|e| bad(&e.to_string()))?;
         Ok(TagPattern { text: pattern.to_owned(), re })
@@ -215,18 +220,41 @@ impl fmt::Display for TrackedVersion {
     }
 }
 
-/// A version range on a track: `^1.2`, `>=2, <3`, `*`, `mixed-precision:^1.2`, or a bare track
-/// name (`mixed-precision`, meaning any version on that track).
+/// A version range, read as npm reads ranges (see [`npm_alternative`]): `^1.2`, `>=2, <3`,
+/// `>=1.0.0 <3.2.4`, `1.2.3 - 2.3.4`, `*`, or `||` alternatives such as `^1.2 || >=2.5.0 <2.6`.
+///
+/// An alternative may open with a track, `mixed-precision:^1.2`, or be a bare track name,
+/// `mixed-precision` (any version on that track); `:^1.2` names the default track. If one
+/// alternative names a track, every alternative must (`mp:^1 || :^2`, not `mp:^1 || ^2`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct TrackedReq {
+    /// The `||` alternatives: a version matches if it matches any of them. Never empty.
+    pub alts: Vec<TrackedAlt>,
+}
+
+/// One `||` alternative of a [`TrackedReq`]: a range on one track.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrackedAlt {
+    /// `None`: the default track.
     pub track: Option<TrackName>,
     pub req: semver::VersionReq,
 }
 
 impl TrackedReq {
+    /// Any version on the default track.
+    pub fn any() -> TrackedReq {
+        TrackedReq { alts: vec![TrackedAlt { track: None, req: semver::VersionReq::STAR }] }
+    }
+
     pub fn matches(&self, v: &TrackedVersion) -> bool {
-        self.track == v.track && self.req.matches(&v.version)
+        self.alts.iter().any(|a| a.track == v.track && a.req.matches(&v.version))
+    }
+
+    /// One exact version, `=1.2.3` (or a bare `1.2.3`), rather than a range.
+    pub fn is_exact(&self) -> bool {
+        matches!(self.alts.as_slice(), [a] if matches!(a.req.comparators.as_slice(),
+            [c] if c.op == semver::Op::Exact && c.minor.is_some() && c.patch.is_some()))
     }
 
     /// The highest version in `candidates` that this range matches.
@@ -238,38 +266,132 @@ impl TrackedReq {
 impl FromStr for TrackedReq {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self> {
-        let (track, rest) = split_track(s)?;
-        // A bare track name: any version on it.
-        if track.is_none() && s.starts_with(|c: char| c.is_ascii_lowercase()) && s != "x" {
-            return Ok(TrackedReq { track: Some(s.parse()?), req: semver::VersionReq::STAR });
+        let bad = |why: String| Error::invalid(format!("'{s}' is not a version range: {why}"));
+        let mut alts = Vec::new();
+        let mut named = Vec::new();
+        for alt in s.split("||") {
+            let alt = alt.trim();
+            let (track, rest, names_track) = match alt.split_once(':') {
+                Some(("", rest)) => (None, rest, true),
+                Some((t, rest)) => (Some(t.parse()?), rest, true),
+                // A bare track name: any version on it.
+                None if alt.starts_with(|c: char| c.is_ascii_lowercase()) && alt != "x" => {
+                    alts.push(TrackedAlt { track: Some(alt.parse()?), req: semver::VersionReq::STAR });
+                    named.push(true);
+                    continue;
+                }
+                None => (None, alt, false),
+            };
+            let req = semver::VersionReq::parse(&npm_alternative(rest).map_err(bad)?)
+                .map_err(|e| bad(e.to_string()))?;
+            alts.push(TrackedAlt { track, req });
+            named.push(names_track);
         }
-        let req = semver::VersionReq::parse(&npm_style(rest))
-            .map_err(|e| Error::invalid(format!("'{s}' is not a version range: {e}")))?;
-        Ok(TrackedReq { track, req })
+        if named.contains(&true) && named.contains(&false) {
+            return Err(bad(
+                "one alternative names a track, so every alternative must (':' for the default track)".to_owned(),
+            ));
+        }
+        Ok(TrackedReq { alts })
     }
 }
 
-/// Bare versions read as npm reads them, not as Cargo does: `1.2.3` is exactly 1.2.3, `1.2` is
-/// `~1.2` (any 1.2.x) and `1` is `^1` (any 1.x.x). A part with an operator (`^`, `~`, `=`, `>`,
-/// `<`) or a wildcard (`*`, `x`) keeps its meaning. Parts are comma-separated, as in `>=1.2, <2`.
-fn npm_style(req: &str) -> String {
-    req.split(',')
-        .map(|part| {
-            let p = part.trim();
-            let bare = p.starts_with(|c: char| c.is_ascii_digit())
-                && !p.split(['.', '-', '+']).take(3).any(|c| matches!(c, "*" | "x" | "X"));
-            if !bare {
-                return p.to_owned();
+/// Reads one `||` alternative of a range (without its track) as npm does, into a Cargo-style
+/// requirement:
+/// - Comparators are separated by commas, spaces or both (`>=1.2, <2`,
+///   `>=1.2 <2`), and an operator may stand apart from its version (`< 3.2.4`).
+/// - `A - B` is a hyphen range: at least `A`, at most `B`. A partial `B` covers what it names
+///   (`1.2 - 2.3` is `>=1.2.0, <2.4.0`).
+/// - Bare versions read as npm reads them, not as Cargo does: `1.2.3` is exactly 1.2.3, `1.2` is
+///   `~1.2` (any 1.2.x) and `1` is `^1` (any 1.x.x). A part with an operator (`^`, `~`, `=`, `>`,
+///   `<`) or a wildcard (`*`, `x`) keeps its meaning.
+fn npm_alternative(alt: &str) -> std::result::Result<String, String> {
+    // Tokens, with a lone operator joined to the version after it.
+    let mut tokens: Vec<String> = Vec::new();
+    let mut pending_op: Option<&str> = None;
+    for t in alt.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        if matches!(t, "^" | "~" | "=" | ">" | "<" | ">=" | "<=") {
+            if pending_op.replace(t).is_some() {
+                return Err(format!("two operators in a row in '{}'", alt.trim()));
             }
-            let core = p.split(['-', '+']).next().unwrap_or(p);
-            match core.split('.').count() {
-                1 => format!("^{p}"),
-                2 => format!("~{p}"),
-                _ => format!("={p}"),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
+            continue;
+        }
+        tokens.push(match pending_op.take() {
+            Some(op) => format!("{op}{t}"),
+            None => t.to_owned(),
+        });
+    }
+    if pending_op.is_some() {
+        return Err(format!("an operator with no version after it in '{}'", alt.trim()));
+    }
+    if tokens.is_empty() {
+        return Err("an empty alternative".to_owned());
+    }
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens.get(i + 1).is_some_and(|t| t == "-") {
+            let (Some(lo), Some(hi)) = (tokens.get(i), tokens.get(i + 2)) else {
+                return Err(format!("'{} -' needs an upper bound", tokens[i]));
+            };
+            parts.push(format!(">={}", hyphen_low(lo)?));
+            parts.push(hyphen_high(hi)?);
+            i += 3;
+        } else if tokens[i] == "-" {
+            return Err("'-' needs a version on each side".to_owned());
+        } else {
+            parts.push(bare_npm(&tokens[i]));
+            i += 1;
+        }
+    }
+    Ok(parts.join(", "))
+}
+
+fn bare_npm(p: &str) -> String {
+    let bare = p.starts_with(|c: char| c.is_ascii_digit())
+        && !p.split(['.', '-', '+']).take(3).any(|c| matches!(c, "*" | "x" | "X"));
+    if !bare {
+        return p.to_owned();
+    }
+    let core = p.split(['-', '+']).next().unwrap_or(p);
+    match core.split('.').count() {
+        1 => format!("^{p}"),
+        2 => format!("~{p}"),
+        _ => format!("={p}"),
+    }
+}
+
+/// The numeric parts a hyphen-range bound names (up to the first wildcard), and whether it is a
+/// full `X.Y.Z` (possibly with a pre-release), which is then used as written.
+fn hyphen_parts(b: &str) -> std::result::Result<(Vec<u64>, bool), String> {
+    let core = b.split(['-', '+']).next().unwrap_or(b);
+    let mut nums = Vec::new();
+    for c in core.split('.') {
+        if matches!(c, "*" | "x" | "X") {
+            break;
+        }
+        nums.push(c.parse::<u64>().map_err(|_| format!("'{b}' in a hyphen range is not a version"))?);
+    }
+    if nums.len() > 3 || (nums.len() < 3 && core != b) {
+        return Err(format!("'{b}' in a hyphen range is not a version"));
+    }
+    Ok((nums.clone(), nums.len() == 3))
+}
+
+fn hyphen_low(b: &str) -> std::result::Result<String, String> {
+    let (n, full) = hyphen_parts(b)?;
+    Ok(if full { b.to_owned() } else { format!("{}.{}.{}", n.first().unwrap_or(&0), n.get(1).unwrap_or(&0), 0) })
+}
+
+fn hyphen_high(b: &str) -> std::result::Result<String, String> {
+    let (n, full) = hyphen_parts(b)?;
+    Ok(match n.as_slice() {
+        _ if full => format!("<={b}"),
+        [] => "*".to_owned(),
+        [major] => format!("<{}.0.0", major + 1),
+        [major, minor] => format!("<{major}.{}.0", minor + 1),
+        _ => unreachable!(),
+    })
 }
 
 impl TryFrom<String> for TrackedReq {
@@ -287,10 +409,20 @@ impl From<TrackedReq> for String {
 
 impl fmt::Display for TrackedReq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.track {
-            Some(t) => write!(f, "{t}:{}", self.req),
-            None => write!(f, "{}", self.req),
+        // Normalized: with a track anywhere, every alternative names one (`:` the default track).
+        let tracked = self.alts.iter().any(|a| a.track.is_some());
+        for (i, a) in self.alts.iter().enumerate() {
+            if i > 0 {
+                write!(f, " || ")?;
+            }
+            match &a.track {
+                Some(t) => write!(f, "{t}:")?,
+                None if tracked => write!(f, ":")?,
+                None => {}
+            }
+            write!(f, "{}", a.req)?;
         }
+        Ok(())
     }
 }
 
@@ -299,7 +431,7 @@ mod tests {
     /// Bare versions read as npm reads them; operators and wildcards keep their meaning.
     #[test]
     fn bare_versions_are_npm_style() {
-        let m = |req: &str, v: &str| req.parse::<TrackedReq>().unwrap().req.matches(&semver::Version::parse(v).unwrap());
+        let m = |req: &str, v: &str| req.parse::<TrackedReq>().unwrap().matches(&TrackedVersion { track: None, version: semver::Version::parse(v).unwrap() });
         assert!(m("1.2.3", "1.2.3") && !m("1.2.3", "1.2.4") && !m("1.2.3", "1.3.0"));
         assert!(m("1.2", "1.2.9") && !m("1.2", "1.3.0") && !m("1.2", "1.1.9"));
         assert!(m("1", "1.9.0") && !m("1", "2.0.0"));
@@ -311,8 +443,45 @@ mod tests {
         assert!(m("2026.5", "2026.5.3") && !m("2026.5", "2026.6.0") && m("2026", "2026.11.0"));
         assert!(m("1.2.3-rc.1", "1.2.3-rc.1") && !m("1.2.3-rc.1", "1.2.3"));
         let t: TrackedReq = "mixed-precision:1.2".parse().unwrap();
-        assert_eq!(t.track.as_ref().map(ToString::to_string).as_deref(), Some("mixed-precision"));
-        assert!(t.req.matches(&semver::Version::parse("1.2.4").unwrap()) && !t.req.matches(&semver::Version::parse("1.3.0").unwrap()));
+        assert_eq!(t.alts[0].track.as_ref().map(ToString::to_string).as_deref(), Some("mixed-precision"));
+        assert!(t.matches(&v("mixed-precision:1.2.4")) && !t.matches(&v("mixed-precision:1.3.0")));
+    }
+
+    /// Full npm range syntax, for forks that only work together in very specific ways.
+    #[test]
+    fn npm_ranges() {
+        let m = |req: &str, ver: &str| req.parse::<TrackedReq>().unwrap().matches(&v(ver));
+        for r in [">=1.0.0 <3.2.4", ">=1.0.0 < 3.2.4", ">= 1.0.0, < 3.2.4", ">=1.0.0,<3.2.4"] {
+            assert!(m(r, "1.0.0") && m(r, "3.2.3") && !m(r, "3.2.4") && !m(r, "0.9.9"), "{r}");
+        }
+        // Hyphen ranges: a partial upper bound covers what it names.
+        assert!(m("1.2.3 - 2.3.4", "2.3.4") && !m("1.2.3 - 2.3.4", "2.3.5") && !m("1.2.3 - 2.3.4", "1.2.2"));
+        assert!(m("1.2 - 2.3", "1.2.0") && m("1.2 - 2.3", "2.3.9") && !m("1.2 - 2.3", "2.4.0"));
+        assert!(m("1 - 2", "2.9.9") && !m("1 - 2", "3.0.0"));
+        assert!(m("1.x - 2.x", "2.5.0") && !m("1.x - 2.x", "3.0.0"));
+        // Alternatives.
+        let r = "^1.2 || >=2.5.0 <2.6 || 3.0.1";
+        assert!(m(r, "1.9.0") && m(r, "2.5.7") && m(r, "3.0.1"));
+        assert!(!m(r, "2.0.0") && !m(r, "2.6.0") && !m(r, "3.0.2"));
+        // Each alternative has its own track; naming one anywhere means naming one everywhere.
+        let t: TrackedReq = "mixed-precision:>=1.0.0 <1.4.2 || :2.1 || other".parse().unwrap();
+        assert!(t.matches(&v("mixed-precision:1.4.1")) && t.matches(&v("2.1.7")) && t.matches(&v("other:9.0.0")));
+        assert!(!t.matches(&v("1.4.1")) && !t.matches(&v("mixed-precision:2.1.7")) && !t.matches(&v("mixed-precision:1.4.2")));
+        assert_eq!(t.to_string(), "mixed-precision:>=1.0.0, <1.4.2 || :~2.1 || other:*");
+        let d: TrackedReq = ":1.0.0".parse().unwrap();
+        assert!(d.matches(&v("1.0.0")) && d.to_string() == "=1.0.0");
+        // It prints back, normalized, in a form it reads.
+        for r in [">=1.0.0 <3.2.4", "1.2 - 2.3", "^1.2 || >=2.5.0 <2.6", "mixed-precision:1 || :3", "mp || other:^2"] {
+            let a: TrackedReq = r.parse().unwrap();
+            assert_eq!(a.to_string().parse::<TrackedReq>().unwrap(), a, "{r}");
+        }
+        assert_eq!(">=1.0.0 <3.2.4".parse::<TrackedReq>().unwrap().to_string(), ">=1.0.0, <3.2.4");
+        for bad in [">=1.0.0 <", "1.2.3 -", "- 1.2.3", "^1 ||", "|| ^1", ">= < 1.0.0", "1.2.3 - 2.x.5-rc",
+                    "mp:^1 || ^2", "^1 || mp", ">=1 mp:<2", "mp:^1 mp:<2"] {
+            assert!(bad.parse::<TrackedReq>().is_err(), "{bad} should be rejected");
+        }
+        assert!("1.2.3".parse::<TrackedReq>().unwrap().is_exact() && "=1.2.3".parse::<TrackedReq>().unwrap().is_exact());
+        assert!(!"1.2".parse::<TrackedReq>().unwrap().is_exact() && !"1.2.3 || 1.2.4".parse::<TrackedReq>().unwrap().is_exact());
     }
 
     use super::*;

@@ -16,14 +16,12 @@ description = "The mixed-precision line"
 target = "upstream/bhns"
 note = "Adds a GPU parfile"
 
-[[depends-on]]
-target = "example/carpetx"
-range = ">=1.0.0, <2.0.0"
+[[dependency]]
+target = "example/carpetx@>=1.0.0, <2.0.0"
 note = "Needs the new driver"
 
 [[works-with]]
-target = "example/stack"
-range = "mixed-precision:^1.2"
+target = "example/stack@mixed-precision:^1.2"
 
 [[incompatible-with]]
 target = "other/thing"
