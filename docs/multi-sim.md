@@ -66,18 +66,19 @@ so an older reader says "upgrade" rather than "unknown key".
 | Format | Generation | Added | Required when |
 |---|---|---|---|
 | Manifest (`MANIFEST_FORMAT`) | 2 | `[sim.files]` | `[sim.files]` is used (`Manifest::required_format`) |
-| `.sim` (`SIM_FORMAT`) | 4 | a `[sim] cactarium` stamp of three parts; a `[[repo]]` pin stamped with a commit | the stamp names one sim of a multi-sim entry, or a pin's `cactarium` is `owner/pkg#<sha>` (`SimFile::required_format`) |
+| `.sim` (`SIM_FORMAT`) | 4 | a `[sim] cactarium` stamp of three parts | the stamp names one sim of a multi-sim entry (`SimFile::required_format`); nothing else needs 4 |
 
 - Format 2 manifests without `[sim.files]` are fine: generations only add, and every older
   generation is read forever (tags are immutable).
 - `SimFile::to_toml` writes the oldest generation that can hold the file, so a sim from a `file`
-  entry stays format 1, 2 or 3 as before; only stamped copies of multi-sim sims, and sims with a
-  pin stamped with a commit, are format 4. A reader from before format 4 would read
-  `et/x/qc0-z4c` as a thorn, so it is asked to upgrade.
-- A pin's `cactarium` names the package version that froze its commit (`owner/pkg@X.Y.Z`), or,
-  for a commit no version froze, the package at that commit (`owner/pkg#<sha>`). A reader from
-  before commit references would refuse `#` as malformed; format 4 makes it ask to upgrade.
-- The stamp's third segment must be a sim name (`Slug::as_sim`).
+  entry stays format 1, 2 or 3 as before and only stamped copies of multi-sim sims are format 4.
+  A reader from before format 4 would read `et/x/qc0-z4c` as a thorn, so it is asked to upgrade.
+- The stamp's third segment must be a sim name (`Slug::as_sim`), and it never names a commit
+  (`#`); nor does a `[provenance] base` (a stack is a release or a tip).
+- A `[[repo]]` pin's `cactarium` is a label, readable at format 1: `owner/pkg@<exact version>`
+  when a version froze the pin's commit, else a bare `owner/pkg` (the pin's `commit` says which).
+  No third segment, `#<sha>`, range, `@head` or `@<hex>`, and none on a download (`sha256`) pin.
+  Frozen stacks' pins follow the same rule.
 
 ## References: the slug's third segment
 
@@ -92,9 +93,9 @@ entry's kind decides what it means:
 | sim, `files` form | refused, listing its sims | `x` is one of its sims: `Slug::as_sim` checks sim-name rules |
 
 Declarations that name packages or stacks keep their old rules: `[[dependency]]`, `[[fork-of]]`,
-claims and a stack's `extends` refuse any third segment; a stack override's `package`, a `.sim`
-pin's `cactarium` and its provenance `base` accept only a thorn name there (`Slug::as_thorn`), as
-before the segment widened. `valid_thorn` is public for clients that read a third segment as a
+claims, a stack's `extends` and a pin's `cactarium` label refuse any third segment; a stack
+override's `package` and a `.sim`'s provenance `base` accept only a thorn name there
+(`Slug::as_thorn`), as before the segment widened. `valid_thorn` is public for clients that read a third segment as a
 thorn.
 
 An old CactUp reads `et/cottonmouth-sims/qc0-z4c` as a thorn (and refuses `qc0-z4c`, which is

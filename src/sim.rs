@@ -255,9 +255,10 @@ pub struct RepoPin {
     /// The pinned content hash (tarball components).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// The Cactarium package this commit belongs to, if any: `owner/pkg@X.Y.Z` for the version
-    /// that froze it, or `owner/pkg#<sha>` for a commit of the package's repo no version froze
-    /// (which needs format 4).
+    /// The Cactarium package this commit belongs to, if any (a label: the commit is what gets
+    /// fetched). `owner/pkg@X.Y.Z` (`@track:X.Y.Z` on a track) when a version froze the commit,
+    /// else a bare `owner/pkg`. Never a thorn, a range, `@head`, or a `#<sha>`: `commit` already
+    /// names the commit. Never on a `sha256` pin (a download belongs to no package).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cactarium: Option<Slug>,
     /// The tree had local modifications at export (only with an explicit override).
@@ -362,6 +363,32 @@ pub(crate) fn validate_repos(repos: &[RepoPin]) -> Result<()> {
         {
             return Err(Error::invalid(format!("repo '{}': '{h}' is not a sha256", r.name)));
         }
+        if let Some(label) = &r.cactarium {
+            validate_pin_label(&r.name, label, r.sha256.is_some())?;
+        }
+    }
+    Ok(())
+}
+
+/// A pin's `cactarium` label ([`RepoPin::cactarium`]): `owner/pkg` or `owner/pkg@<exact version>`,
+/// never on a download (a `sha256` pin), which belongs to no package.
+fn validate_pin_label(repo: &str, label: &Slug, download: bool) -> Result<()> {
+    let bad = |why: &str| {
+        Err(Error::invalid(format!(
+            "repo '{repo}': cactarium '{label}' {why}; a pin is labeled owner/pkg@X.Y.Z (the version that froze its commit) or owner/pkg"
+        )))
+    };
+    if download {
+        return bad("labels a download (only a git repo belongs to a package)");
+    }
+    if label.thorn.is_some() {
+        return bad("names a thorn or sim");
+    }
+    if label.sha.is_some() {
+        return bad("names a commit (the pin's commit says which)");
+    }
+    if label.at.is_some() && label.exact().is_err() {
+        return bad("is not one exact version");
     }
     Ok(())
 }
@@ -391,13 +418,10 @@ impl SimFile {
     }
 
     /// The oldest generation that can hold this file: 4 when it is stamped as one sim of a
-    /// multi-sim entry (`owner/name/sim@X.Y.Z`) or a pin is stamped with a commit
-    /// (`owner/pkg#<sha>`), 3 when an input is a file of the sim's own repository, 2 when an input
-    /// unpacks an archive, else 1.
+    /// multi-sim entry (`owner/name/sim@X.Y.Z`), 3 when an input is a file of the sim's own
+    /// repository, 2 when an input unpacks an archive, else 1.
     pub fn required_format(&self) -> u32 {
-        let names_a_sim = self.sim.cactarium.as_ref().is_some_and(|s| s.thorn.is_some());
-        let commit_stamp = self.repos.iter().any(|r| r.cactarium.as_ref().is_some_and(|s| s.sha.is_some()));
-        if names_a_sim || commit_stamp {
+        if self.sim.cactarium.as_ref().is_some_and(|s| s.thorn.is_some()) {
             4
         } else if self.inputs.iter().any(|i| i.repo_file.is_some()) {
             3
@@ -416,13 +440,17 @@ impl SimFile {
         if self.format < self.required_format() {
             return Err(Error::invalid(format!(
                 "format {} cannot hold this file (archive inputs need format 2, repo-file inputs 3, \
-                 a stamp naming one sim of a multi-sim entry or a pin stamped with a commit \
-                 (owner/pkg#<sha>) 4); it needs format {}",
+                 a stamp naming one sim of a multi-sim entry 4); it needs format {}",
                 self.format,
                 self.required_format()
             )));
         }
         if let Some(stamp) = &self.sim.cactarium {
+            if stamp.sha.is_some() {
+                return Err(Error::invalid(format!(
+                    "[sim] cactarium '{stamp}' names a commit; a sim is stamped with its version (owner/name@X.Y.Z)"
+                )));
+            }
             stamp.as_sim().map_err(|e| Error::invalid(format!("[sim] cactarium: {e}")))?;
         }
         if self.sim.name.trim().is_empty() {
@@ -458,14 +486,15 @@ impl SimFile {
         {
             return Err(Error::invalid("[provenance] has both a flavor and an optionlist"));
         }
-        // Package and stack references: a third segment, if any, is a thorn, as before slugs widened.
+        // A stack reference: a third segment, if any, is a thorn, as before slugs widened. A stack
+        // is a release or a branch tip, never a commit.
         if let Some(b) = self.provenance.as_ref().and_then(|p| p.base.as_ref()) {
-            b.as_thorn()?;
-        }
-        for r in &self.repos {
-            if let Some(c) = &r.cactarium {
-                c.as_thorn()?;
+            if b.sha.is_some() {
+                return Err(Error::invalid(format!(
+                    "[provenance] base '{b}' names a commit; a stack is owner/stack@X.Y.Z, @head or @master"
+                )));
             }
+            b.as_thorn()?;
         }
         validate_repos(&self.repos)
     }

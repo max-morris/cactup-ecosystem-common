@@ -251,6 +251,19 @@ impl TrackedReq {
         self.alts.iter().any(|a| a.track == v.track && a.req.matches(&v.version))
     }
 
+    /// The range holding exactly `v`, on its track: `=1.2.3`, or `mixed-precision:=1.2.3` on a
+    /// track (written as such by `Display`; never `=mixed-precision:1.2.3`, which isn't a range).
+    pub fn exactly(v: &TrackedVersion) -> TrackedReq {
+        let c = semver::Comparator {
+            op: semver::Op::Exact,
+            major: v.version.major,
+            minor: Some(v.version.minor),
+            patch: Some(v.version.patch),
+            pre: v.version.pre.clone(),
+        };
+        TrackedReq { alts: vec![TrackedAlt { track: v.track.clone(), req: semver::VersionReq { comparators: vec![c] } }] }
+    }
+
     /// One exact version, `=1.2.3` (or a bare `1.2.3`), rather than a range.
     pub fn is_exact(&self) -> bool {
         matches!(self.alts.as_slice(), [a] if matches!(a.req.comparators.as_slice(),

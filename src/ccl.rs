@@ -8,9 +8,10 @@
 //! - `configuration.ccl`: `REQUIRES` capabilities, `REQUIRES THORNS`, `OPTIONAL`, `PROVIDES`.
 //!
 //! Keywords are case-insensitive, `#` starts a comment, and the bodies of `{ ... }` blocks (a
-//! `PROVIDES` block's `SCRIPT`/`LANG`, an `OPTIONAL` block's `DEFINE`) are skipped. Names keep the
-//! case they were written in; Cactus compares implementation and capability names
-//! case-insensitively, so callers should too.
+//! `PROVIDES` block's `SCRIPT`/`LANG`, an `OPTIONAL` block's `DEFINE`) are skipped. Names are kept
+//! only when they are CCL names ([`is_ccl_name`]), in the case they were written in; Cactus
+//! compares implementation and capability names case-insensitively, so callers should too
+//! ([`Need`] does).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -47,10 +48,27 @@ fn words(s: &str) -> impl Iterator<Item = String> + '_ {
     s.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).map(str::to_owned)
 }
 
+/// A CCL name: an implementation, capability, function or thorn, `[A-Za-z0-9_]+`. The scanner
+/// keeps only words of this shape as names (Cactus accepts no others), so every [`Need`] has one
+/// and never needs escaping in a query string.
+pub fn is_ccl_name(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The CCL names in a list written with spaces and/or commas; other words are dropped.
+fn names(s: &str) -> impl Iterator<Item = String> + '_ {
+    words(s).filter(|w| is_ccl_name(w))
+}
+
+/// The first word, if it is a CCL name.
+fn first_name(s: &str) -> Option<String> {
+    words(s).next().filter(|w| is_ccl_name(w))
+}
+
 /// A capability name without a version constraint: `HDF5(>=1.10)` → `HDF5`.
 fn bare_capability(w: &str) -> Option<String> {
     let name = w.split('(').next().unwrap_or("").trim();
-    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')).then(|| name.to_owned())
+    is_ccl_name(name).then(|| name.to_owned())
 }
 
 /// Splits `KEYWORD rest` case-insensitively; `rest` keeps its case.
@@ -101,23 +119,23 @@ impl ThornFacts {
         let mut f = ThornFacts::default();
         for line in interface.lines().map(strip_comment).filter(|l| !l.is_empty()) {
             if let Some(rest) = after_keyword(line, "IMPLEMENTS") {
-                f.implements = words(after_colon(rest)).next();
+                f.implements = first_name(after_colon(rest));
             } else if let Some(rest) = after_keyword(line, "INHERITS") {
-                f.inherits.extend(words(after_colon(rest)));
+                f.inherits.extend(names(after_colon(rest)));
             } else if let Some(rest) = after_keyword(line, "FRIENDS").or_else(|| after_keyword(line, "FRIEND")) {
-                f.friends.extend(words(after_colon(rest)));
+                f.friends.extend(names(after_colon(rest)));
             } else if let Some(rest) = after_keyword(line, "REQUIRES") {
                 if let Some(name) = after_keyword(rest.trim_start(), "FUNCTION") {
-                    f.requires_functions.extend(words(name).take(1));
+                    f.requires_functions.extend(first_name(name));
                 }
             } else if let Some(rest) = after_keyword(line, "PROVIDES") {
                 if let Some(name) = after_keyword(rest.trim_start(), "FUNCTION") {
-                    f.provides_functions.extend(words(name).take(1));
+                    f.provides_functions.extend(first_name(name));
                 }
             } else if let Some(rest) = after_keyword(line, "USES") {
                 let rest = rest.trim_start();
                 if let Some(name) = after_keyword(rest, "FUNCTION") {
-                    f.uses_functions.extend(words(name).take(1));
+                    f.uses_functions.extend(first_name(name));
                 } else if let Some(inc) = after_keyword(rest, "INCLUDE") {
                     // USES INCLUDE [SOURCE|HEADER]: file.h ...
                     let inc = inc.trim_start();
@@ -131,7 +149,7 @@ impl ThornFacts {
                 if let Some(rest) = after_keyword(&line, "REQUIRES") {
                     let rest = rest.trim_start();
                     if let Some(thorns) = after_keyword(rest, "THORNS") {
-                        f.requires_thorns.extend(words(after_colon(thorns)));
+                        f.requires_thorns.extend(names(after_colon(thorns)));
                     } else {
                         f.requires.extend(words(rest).filter_map(|w| bare_capability(&w)));
                     }
@@ -169,7 +187,10 @@ impl ThornFacts {
 /// Soft declarations are not needs: `OPTIONAL` capabilities, `USES FUNCTION`, and `USES INCLUDE`
 /// (no thorn's facts say which includes it provides yet). A capability's version constraint
 /// (`HDF5(>=1.10)`) is not read, only its name.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// Equality, hashing and order are case-insensitive, by [`Need::key`], as [`meets`] compares:
+/// `Need::Capability("hdf5".into()) == Need::Capability("HDF5".into())`.
+#[derive(Clone, Debug)]
 pub enum Need {
     /// An implementation it `INHERITS` from or is a `FRIEND` of: met by a thorn that `IMPLEMENTS` it.
     Implementation(String),
@@ -183,11 +204,48 @@ pub enum Need {
 }
 
 impl Need {
-    /// The name required: an implementation, capability, thorn or function.
+    /// The name required: an implementation, capability, thorn or function, as written.
     pub fn name(&self) -> &str {
         match self {
             Need::Implementation(n) | Need::Capability(n) | Need::Thorn(n) | Need::Function(n) => n,
         }
+    }
+
+    /// What two needs are compared by: the kind, and the name folded to lowercase.
+    pub fn key(&self) -> (u8, String) {
+        let kind = match self {
+            Need::Implementation(_) => 0,
+            Need::Capability(_) => 1,
+            Need::Thorn(_) => 2,
+            Need::Function(_) => 3,
+        };
+        (kind, self.name().to_ascii_lowercase())
+    }
+}
+
+impl PartialEq for Need {
+    fn eq(&self, other: &Need) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for Need {}
+
+impl std::hash::Hash for Need {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.key().hash(state)
+    }
+}
+
+impl PartialOrd for Need {
+    fn partial_cmp(&self, other: &Need) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Need {
+    fn cmp(&self, other: &Need) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
     }
 }
 
@@ -214,7 +272,7 @@ pub fn needs_of(facts: &ThornFacts) -> Vec<Need> {
     v.extend(facts.requires_thorns.iter().map(|t| Need::Thorn(t.clone())));
     v.extend(facts.requires_functions.iter().map(|x| Need::Function(x.clone())));
     let mut seen = std::collections::HashSet::new();
-    v.retain(|n| seen.insert((std::mem::discriminant(n), n.name().to_ascii_lowercase())));
+    v.retain(|n| seen.insert(n.clone()));
     v
 }
 
@@ -431,6 +489,52 @@ PROVIDES CarpetX
         set.extend([("TmunuBaseX", &tmunu), ("Arith", &arith)]);
         assert!(unmet(&z4c, set.iter().copied()).is_empty());
         assert_eq!(unmet(&z4c, []).len(), 6, "nothing meets anything");
+    }
+
+    /// Needs compare as `meets` does: by kind, and by name without case.
+    #[test]
+    fn needs_compare_without_case() {
+        use std::collections::{BTreeSet, HashSet};
+        assert_eq!(Need::Capability("hdf5".into()), Need::Capability("HDF5".into()));
+        assert_ne!(Need::Capability("Loop".into()), Need::Implementation("Loop".into()));
+        let set: HashSet<Need> = [Need::Function("GetX".into()), Need::Function("getx".into())].into();
+        assert_eq!(set.len(), 1);
+        let ordered: BTreeSet<Need> = [Need::Thorn("carpetx".into()), Need::Thorn("CarpetX".into())].into();
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(Need::Thorn("CarpetX".into()).key(), (2, "carpetx".to_owned()));
+        // The first spelling is kept.
+        let f = ThornFacts::scan("IMPLEMENTS: X\nINHERITS: ADMBase\nFRIENDS: admbase", None);
+        assert_eq!(needs_of(&f)[0].name(), "ADMBase");
+        assert_eq!(needs_of(&f).len(), 1);
+    }
+
+    /// `REQUIRES THORNS` names a thorn in any case; the thorn of that name meets it in any other.
+    #[test]
+    fn mixed_case_required_thorns() {
+        let f = ThornFacts::scan("IMPLEMENTS: Z4c", Some("REQUIRES THORNS: CarpetX, loop\n"));
+        let carpetx = ThornFacts::scan("IMPLEMENTS: CarpetX", None);
+        let looped = ThornFacts::scan("IMPLEMENTS: Loop", None);
+        for name in ["CarpetX", "carpetx", "CARPETX"] {
+            assert!(meets(name, &carpetx, &Need::Thorn("CarpetX".into())), "{name}");
+        }
+        assert!(unmet(&f, [("carpetx", &carpetx), ("Loop", &looped)]).is_empty());
+        assert_eq!(unmet(&f, [("Loop", &looped)]), [Need::Thorn("CarpetX".into())]);
+    }
+
+    /// Only CCL names are kept, so every need has one.
+    #[test]
+    fn names_are_ccl_names() {
+        let f = ThornFacts::scan(
+            "IMPLEMENTS: 2D_Ok\nINHERITS: good, b@d, 3rd\nREQUIRES FUNCTION F-1\nPROVIDES FUNCTION G WITH H LANGUAGE C",
+            Some("REQUIRES 1HDF5(>=1) sp-ace\nREQUIRES THORNS: Fine, no/pe\n"),
+        );
+        assert_eq!(f.implements.as_deref(), Some("2D_Ok"));
+        assert_eq!(f.inherits, ["good", "3rd"]);
+        assert!(f.requires_functions.is_empty());
+        assert_eq!(f.provides_functions, ["G"]);
+        assert_eq!(f.requires, ["1HDF5"]);
+        assert_eq!(f.requires_thorns, ["Fine"]);
+        assert!(needs_of(&f).iter().all(|n| is_ccl_name(n.name())));
     }
 
     #[test]

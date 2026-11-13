@@ -120,11 +120,18 @@ conflict and `works-with` as information.
 A sim pins every repo to a commit already; it declares no dependencies. The Cactarium derives what
 a sim is built on from its pins (repo URL plus commit → `owner/pkg@version`, or `owner/pkg#sha` for
 a commit no version froze) and shows it. A repo URL matches a registered package's by
-`url::normalize_repo_url` (scheme, login, port, `.git` and slashes don't count; host case doesn't
-either; path case does). A pin stamped `cactarium = "owner/pkg#<sha>"` needs `.sim` format 4.
-`POST /api/v1/lookup` makes the same derivation for a client before it publishes. **Every pin must belong to a registered package**, at a
-commit that package's repo has, or the sim is refused: a downstream user must be able to rebuild it
-from the Cactarium alone. The flesh pin is `et/cactus` (or a fork of it).
+`url::normalize_repo_url` (scheme, login, default ports, `.git` and slashes don't count; host
+case doesn't either; path case does). `POST /api/v1/lookup` makes the same derivation for a
+client before it publishes. **Every pin must belong to a registered package**, at a commit that
+package's repo has, or the sim is refused: a downstream user must be able to rebuild it from the
+Cactarium alone.
+
+A pin may carry that derivation as a label, `cactarium` in its `[[repo]]` (a frozen stack's pins
+too): `owner/pkg@<exact version>` when a version froze its commit, else a bare `owner/pkg`, whose
+`commit` says which commit. A label never names a commit (`#<sha>`), a range, a tip or a thorn,
+and a download (`sha256` pin) has none. Both forms are `.sim` format 1. (`owner/pkg#<sha>` stays a
+reference a user types, `cactup add et/carpet#3f2c9e1`, and a target a declaration may give; it is
+never a pin's label.) The flesh pin is `et/cactus` (or a fork of it).
 
 ## CCL requirements (`ccl::Need`)
 
@@ -138,7 +145,9 @@ with this crate's `needs_of` and `meets`, so they cannot disagree about what a t
 | `Thorn(t)` | `REQUIRES THORNS: t` | is named `t` |
 | `Function(f)` | `REQUIRES FUNCTION f` | `PROVIDES FUNCTION f` (the alias, not the providing routine) |
 
-- Names compare case-insensitively, as Cactus compares them; each need is listed once.
+- Names compare case-insensitively, as Cactus compares them, and so do `Need`s themselves
+  (`Need::key`); each need is listed once. Only CCL names (`[A-Za-z0-9_]+`, `ccl::is_ccl_name`)
+  are read as names, so every need fits a `/providers` query.
 - A thorn without an `IMPLEMENTS` line implements nothing (Cactus refuses to build one), so it
   never meets an implementation need, even one spelled like its own name.
 - Not needs: `OPTIONAL` capabilities, `USES FUNCTION`, and `USES INCLUDE` (no facts say which
@@ -218,9 +227,11 @@ Runs on `cactup add`, `cactup install`, and upgrades, in CactUp; the Cactarium s
   `--exact` pins the version built with instead, for an upstream not to be trusted. Exactness for
   reproducing a run lives in sims and stack releases, which pin commits.
 - **Forks are detected:** a repo whose history contains an installed package's frozen commit and
-  that has that package's thorns gets `[[fork-of]] target = "<package>@=<version>"`, exact: the
-  newest upstream version whose frozen commit the fork's history contains (`et/carpet@=2026.5.1`),
-  never a `~<series>` range. That is all the history proves; an author who knows the fork keeps
+  that has that package's thorns gets a `[[fork-of]]` on exactly the newest upstream version whose
+  frozen commit the fork's history contains, never a `~<series>` range: `<package>@=<X.Y.Z>` on
+  the default track (`et/carpet@=2026.5.1`), `<package>@<track>:=<X.Y.Z>` on a track
+  (`et/carpet@mixed-precision:=1.2.0`; the track comes before the `=`). `ForkOf::exactly`
+  writes it (`TrackedReq::exactly` the range). That is all the history proves; an author who knows the fork keeps
   up with later patches widens the range by hand. `POST /api/v1/lookup` answers which package
   and version a commit is, and what a package forks (`fork-of` in its answer).
 - **What looks suspicious becomes a commented TODO line,** never a claim: an include that reaches
