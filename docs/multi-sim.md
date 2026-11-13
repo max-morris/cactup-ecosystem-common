@@ -66,13 +66,17 @@ so an older reader says "upgrade" rather than "unknown key".
 | Format | Generation | Added | Required when |
 |---|---|---|---|
 | Manifest (`MANIFEST_FORMAT`) | 2 | `[sim.files]` | `[sim.files]` is used (`Manifest::required_format`) |
-| `.sim` (`SIM_FORMAT`) | 4 | a `[sim] cactarium` stamp of three parts | the stamp names one sim of a multi-sim entry (`SimFile::required_format`) |
+| `.sim` (`SIM_FORMAT`) | 4 | a `[sim] cactarium` stamp of three parts; a `[[repo]]` pin stamped with a commit | the stamp names one sim of a multi-sim entry, or a pin's `cactarium` is `owner/pkg#<sha>` (`SimFile::required_format`) |
 
 - Format 2 manifests without `[sim.files]` are fine: generations only add, and every older
   generation is read forever (tags are immutable).
 - `SimFile::to_toml` writes the oldest generation that can hold the file, so a sim from a `file`
-  entry stays format 1, 2 or 3 as before and only stamped copies of multi-sim sims are format 4.
-  A reader from before format 4 would read `et/x/qc0-z4c` as a thorn, so it is asked to upgrade.
+  entry stays format 1, 2 or 3 as before; only stamped copies of multi-sim sims, and sims with a
+  pin stamped with a commit, are format 4. A reader from before format 4 would read
+  `et/x/qc0-z4c` as a thorn, so it is asked to upgrade.
+- A pin's `cactarium` names the package version that froze its commit (`owner/pkg@X.Y.Z`), or,
+  for a commit no version froze, the package at that commit (`owner/pkg#<sha>`). A reader from
+  before commit references would refuse `#` as malformed; format 4 makes it ask to upgrade.
 - The stamp's third segment must be a sim name (`Slug::as_sim`).
 
 ## References: the slug's third segment

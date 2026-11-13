@@ -2,7 +2,9 @@
 
 What a package, stack or sim declares about other packages, what each declaration means, how the
 Cactarium checks it, and how CactUp resolves it. The types live in this crate (`manifest.rs`:
-`Dependency`, `Alternative`, `ForkOf`, `Claim`; `version.rs`: `TrackedReq`, `TagPattern`).
+`Dependency`, `Alternative`, `ForkOf`, `Claim`; `version.rs`: `TrackedReq`, `TagPattern`;
+`ccl.rs`: `Need`, `needs_of`, `meets`, `unmet`; `url.rs`: `normalize_repo_url`), and the API
+shapes the two exchange in `api.rs` ([api.md](api.md)).
 
 ## Principles
 
@@ -117,9 +119,37 @@ conflict and `works-with` as information.
 
 A sim pins every repo to a commit already; it declares no dependencies. The Cactarium derives what
 a sim is built on from its pins (repo URL plus commit → `owner/pkg@version`, or `owner/pkg#sha` for
-a commit no version froze) and shows it. **Every pin must belong to a registered package**, at a
+a commit no version froze) and shows it. A repo URL matches a registered package's by
+`url::normalize_repo_url` (scheme, login, port, `.git` and slashes don't count; host case doesn't
+either; path case does). A pin stamped `cactarium = "owner/pkg#<sha>"` needs `.sim` format 4.
+`POST /api/v1/lookup` makes the same derivation for a client before it publishes. **Every pin must belong to a registered package**, at a
 commit that package's repo has, or the sim is refused: a downstream user must be able to rebuild it
 from the Cactarium alone. The flesh pin is `et/cactus` (or a fork of it).
+
+## CCL requirements (`ccl::Need`)
+
+The Cactarium's check and CactUp's composition and trim read a thorn's requirements the same way,
+with this crate's `needs_of` and `meets`, so they cannot disagree about what a thorn needs:
+
+| `Need` | From the thorn's facts | Met by a thorn that |
+|---|---|---|
+| `Implementation(i)` | `INHERITS: i`, `FRIEND(S): i` | `IMPLEMENTS: i` |
+| `Capability(c)` | `REQUIRES c` (configuration.ccl) | `PROVIDES c` |
+| `Thorn(t)` | `REQUIRES THORNS: t` | is named `t` |
+| `Function(f)` | `REQUIRES FUNCTION f` | `PROVIDES FUNCTION f` (the alias, not the providing routine) |
+
+- Names compare case-insensitively, as Cactus compares them; each need is listed once.
+- A thorn without an `IMPLEMENTS` line implements nothing (Cactus refuses to build one), so it
+  never meets an implementation need, even one spelled like its own name.
+- Not needs: `OPTIONAL` capabilities, `USES FUNCTION`, and `USES INCLUDE` (no facts say which
+  thorn provides an include yet). A capability's version constraint (`HDF5(>=1.10)`) isn't read.
+- `unmet(facts, thorns)` lists the needs a set of thorns leaves unmet. `GET /api/v1/providers`
+  answers "which published thorns meet this need" (`api::ProvidersQuery::of(&need)`).
+
+How a requirement is met is common ground; what to do about one is not. The Cactarium refuses a
+version with an unmet need. CactUp's trim keeps every thorn that could meet a required capability
+or thorn, and for an implementation or function adds providers only when no kept thorn already
+meets it (the parfile chose that one).
 
 ## The check at publish (the Cactarium)
 
@@ -188,7 +218,11 @@ Runs on `cactup add`, `cactup install`, and upgrades, in CactUp; the Cactarium s
   `--exact` pins the version built with instead, for an upstream not to be trusted. Exactness for
   reproducing a run lives in sims and stack releases, which pin commits.
 - **Forks are detected:** a repo whose history contains an installed package's frozen commit and
-  that has that package's thorns gets `[[fork-of]] target = "<package>@~<series>"`.
+  that has that package's thorns gets `[[fork-of]] target = "<package>@=<version>"`, exact: the
+  newest upstream version whose frozen commit the fork's history contains (`et/carpet@=2026.5.1`),
+  never a `~<series>` range. That is all the history proves; an author who knows the fork keeps
+  up with later patches widens the range by hand. `POST /api/v1/lookup` answers which package
+  and version a commit is, and what a package forks (`fork-of` in its answer).
 - **What looks suspicious becomes a commented TODO line,** never a claim: an include that reaches
   another package's thorn by path, a generic `Driver` inherit next to one driver's headers.
 - Generated files are written for review; the user commits them. `--publish` registers.

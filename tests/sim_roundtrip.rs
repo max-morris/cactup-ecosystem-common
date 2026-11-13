@@ -335,3 +335,42 @@ fn a_three_part_stamp_needs_format_4() {
     let err = SimFile::from_toml(&thorn_like).unwrap_err().to_string();
     assert!(err.contains("[sim] cactarium"), "{err}");
 }
+
+/// A pin stamped with a commit no version froze (`owner/pkg#<sha>`) needs format 4 too, so a
+/// reader from before commit references asks to be upgraded instead of calling the file
+/// malformed. A pin stamped with a version needs nothing new.
+#[test]
+fn a_commit_stamp_on_a_pin_needs_format_4() {
+    let mut sim = sample("x\n", "y\n");
+    assert!(sim.to_toml().unwrap().starts_with("format = 1\n"), "a version stamp needs nothing new");
+
+    sim.repos[0].cactarium = Some(format!("max-morris/carpetx#{SHA}").parse().unwrap());
+    assert_eq!(sim.required_format(), 4);
+    let text = sim.to_toml().unwrap();
+    assert!(text.starts_with("format = 4\n"), "{text}");
+    assert!(text.contains(&format!("cactarium = \"max-morris/carpetx#{SHA}\"")), "{text}");
+    let back = SimFile::from_toml(&text).unwrap();
+    assert_eq!(back.format, 4);
+    assert_eq!(back.repos[0].cactarium.as_ref().unwrap().sha(), Some(SHA));
+    assert_eq!(back, SimFile { format: 4, ..sim.clone() });
+
+    for older in 1..4 {
+        let claims = text.replacen("format = 4", &format!("format = {older}"), 1);
+        let err = SimFile::from_toml(&claims).unwrap_err().to_string();
+        assert!(err.contains("needs format 4") && err.contains("owner/pkg#<sha>"), "{err}");
+    }
+
+    // An abbreviated commit is still a commit stamp; a thorn segment keeps the thorn rules.
+    sim.repos[0].cactarium = Some("max-morris/carpetx#3f2c9e1".parse().unwrap());
+    assert_eq!(sim.required_format(), 4);
+    sim.repos[0].cactarium = Some("max-morris/carpetx/CarpetX#3f2c9e1".parse().unwrap());
+    assert_eq!(sim.required_format(), 4);
+    assert!(sim.to_toml().is_ok());
+
+    // Every other content of a format-4 file still reads alongside it, and the commit stamp alone
+    // decides: a file that also needs format 2 or 3 is still written as 4.
+    sim.inputs.push(archive_input());
+    assert_eq!(sim.required_format(), 4);
+    sim.repos[0].cactarium = None;
+    assert_eq!(sim.required_format(), 2);
+}

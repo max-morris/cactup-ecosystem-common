@@ -12,6 +12,7 @@
 //! case they were written in; Cactus compares implementation and capability names
 //! case-insensitively, so callers should too.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -160,6 +161,87 @@ impl ThornFacts {
     }
 }
 
+/// A hard CCL requirement of a thorn, as [`needs_of`] reads it from its [`ThornFacts`]. The
+/// Cactarium checks every published thorn's needs against the package and its dependencies'
+/// `needs` thorns; CactUp finds the thorns that meet them when it composes or trims a thornlist.
+/// Names keep the case they were written in and are compared case-insensitively ([`meets`]).
+///
+/// Soft declarations are not needs: `OPTIONAL` capabilities, `USES FUNCTION`, and `USES INCLUDE`
+/// (no thorn's facts say which includes it provides yet). A capability's version constraint
+/// (`HDF5(>=1.10)`) is not read, only its name.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Need {
+    /// An implementation it `INHERITS` from or is a `FRIEND` of: met by a thorn that `IMPLEMENTS` it.
+    Implementation(String),
+    /// A capability it `REQUIRES` (configuration.ccl): met by a thorn that `PROVIDES` it.
+    Capability(String),
+    /// A thorn named in `REQUIRES THORNS`: met by the thorn of that name.
+    Thorn(String),
+    /// A function it `REQUIRES FUNCTION` (an aliased function): met by a thorn that
+    /// `PROVIDES FUNCTION` it.
+    Function(String),
+}
+
+impl Need {
+    /// The name required: an implementation, capability, thorn or function.
+    pub fn name(&self) -> &str {
+        match self {
+            Need::Implementation(n) | Need::Capability(n) | Need::Thorn(n) | Need::Function(n) => n,
+        }
+    }
+}
+
+/// What the requiring thorn does, for a message: `{thorn} {need}` reads
+/// "Z4c inherits or befriends ADMBase".
+impl fmt::Display for Need {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Need::Implementation(i) => write!(f, "inherits or befriends {i}"),
+            Need::Capability(c) => write!(f, "requires the capability {c}"),
+            Need::Thorn(t) => write!(f, "requires the thorn {t}"),
+            Need::Function(x) => write!(f, "requires the function {x}"),
+        }
+    }
+}
+
+/// The hard requirements of a thorn with `facts`: the implementations it inherits from or
+/// befriends, then the capabilities, thorns and functions it requires, each once (compared
+/// case-insensitively, the first spelling kept).
+pub fn needs_of(facts: &ThornFacts) -> Vec<Need> {
+    let mut v: Vec<Need> = Vec::new();
+    v.extend(facts.inherits.iter().chain(&facts.friends).map(|i| Need::Implementation(i.clone())));
+    v.extend(facts.requires.iter().map(|c| Need::Capability(c.clone())));
+    v.extend(facts.requires_thorns.iter().map(|t| Need::Thorn(t.clone())));
+    v.extend(facts.requires_functions.iter().map(|x| Need::Function(x.clone())));
+    let mut seen = std::collections::HashSet::new();
+    v.retain(|n| seen.insert((std::mem::discriminant(n), n.name().to_ascii_lowercase())));
+    v
+}
+
+/// Whether the thorn `thorn` (its name, as Cactus knows it) with `facts` meets `need`. Names
+/// compare case-insensitively, as Cactus compares them. A thorn without an `IMPLEMENTS` line
+/// implements nothing (Cactus refuses to build one), so it never meets an implementation need.
+pub fn meets(thorn: &str, facts: &ThornFacts, need: &Need) -> bool {
+    let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+    match need {
+        Need::Implementation(i) => facts.implements.as_deref().is_some_and(|x| eq(x, i)),
+        Need::Capability(c) => facts.provides.iter().any(|p| eq(p, c)),
+        Need::Thorn(t) => eq(thorn, t),
+        Need::Function(x) => facts.provides_functions.iter().any(|p| eq(p, x)),
+    }
+}
+
+/// The needs of a thorn with `facts` that none of `thorns` (name and facts, the thorn itself
+/// included if it should count) meets, in [`needs_of`]'s order. Empty means the set meets them all.
+pub fn unmet<'a, I>(facts: &ThornFacts, thorns: I) -> Vec<Need>
+where
+    I: IntoIterator<Item = (&'a str, &'a ThornFacts)>,
+    I::IntoIter: Clone,
+{
+    let thorns = thorns.into_iter();
+    needs_of(facts).into_iter().filter(|need| !thorns.clone().any(|(name, f)| meets(name, f, need))).collect()
+}
+
 /// A thorn found in a source tree.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -282,6 +364,73 @@ PROVIDES CarpetX
         assert_eq!(f.requires_thorns, ["Arith", "CarpetXRegrid", "Loop"]);
         assert_eq!(f.optional, ["ADIOS2", "openPMD_api", "Silo"]);
         assert_eq!(f.provides, ["CarpetX"]);
+    }
+
+    /// Representative facts: Z4c on CarpetX, as the ET builds it.
+    fn z4c() -> ThornFacts {
+        ThornFacts::scan(
+            "IMPLEMENTS: Z4c\nINHERITS: ADMBaseX, TmunuBaseX\nFRIENDS: admbasex\n\
+             CCTK_INT FUNCTION GetCallFunctionCount()\nREQUIRES FUNCTION GetCallFunctionCount\n\
+             USES FUNCTION GetLoopDevice\nUSES INCLUDE HEADER: loop_device.hxx\n",
+            Some("REQUIRES Arith Loop\nREQUIRES THORNS: CarpetX\nOPTIONAL Silo\n{\n}\n"),
+        )
+    }
+
+    #[test]
+    fn needs_are_the_hard_requirements() {
+        assert_eq!(
+            needs_of(&z4c()),
+            [
+                Need::Implementation("ADMBaseX".into()),
+                Need::Implementation("TmunuBaseX".into()),
+                Need::Capability("Arith".into()),
+                Need::Capability("Loop".into()),
+                Need::Thorn("CarpetX".into()),
+                Need::Function("GetCallFunctionCount".into()),
+            ],
+            "a friend that is also inherited once; no optional capability, used function or include"
+        );
+        assert_eq!(Need::Implementation("ADMBaseX".into()).to_string(), "inherits or befriends ADMBaseX");
+        assert_eq!(Need::Function("F".into()).to_string(), "requires the function F");
+        // The same name as two kinds of need is two needs.
+        let f = ThornFacts::scan("IMPLEMENTS: X\nINHERITS: Loop", Some("REQUIRES Loop"));
+        assert_eq!(needs_of(&f), [Need::Implementation("Loop".into()), Need::Capability("Loop".into())]);
+    }
+
+    #[test]
+    fn what_meets_a_need() {
+        let admbasex = ThornFacts::scan("implements: admbasex", None);
+        let carpetx = ThornFacts::scan(
+            "IMPLEMENTS: CarpetX\nPROVIDES FUNCTION GetCallFunctionCount WITH CarpetX_GetCallFunctionCount LANGUAGE C",
+            Some("PROVIDES Loop\n{\n}\n"),
+        );
+        assert!(meets("ADMBaseX", &admbasex, &Need::Implementation("ADMBaseX".into())), "case-insensitive");
+        assert!(meets("CarpetX", &carpetx, &Need::Capability("loop".into())));
+        assert!(meets("CarpetX", &carpetx, &Need::Function("getcallfunctioncount".into())), "by its alias");
+        assert!(!meets("CarpetX", &carpetx, &Need::Function("CarpetX_GetCallFunctionCount".into())), "not by the provider's own name");
+        assert!(meets("carpetx", &carpetx, &Need::Thorn("CarpetX".into())));
+        assert!(!meets("CarpetX", &carpetx, &Need::Implementation("Loop".into())), "a capability is not an implementation");
+        // A thorn's name is not its implementation: without IMPLEMENTS it implements nothing.
+        let anonymous = ThornFacts::scan("INHERITS: grid", None);
+        assert!(!meets("ADMBaseX", &anonymous, &Need::Implementation("ADMBaseX".into())));
+        assert!(meets("ADMBaseX", &anonymous, &Need::Thorn("ADMBaseX".into())), "but it is still that thorn");
+    }
+
+    #[test]
+    fn unmet_needs_of_a_set() {
+        let z4c = z4c();
+        let admbasex = ThornFacts::scan("IMPLEMENTS: ADMBaseX", None);
+        let tmunu = ThornFacts::scan("IMPLEMENTS: TmunuBaseX", None);
+        let carpetx = ThornFacts::scan(
+            "IMPLEMENTS: CarpetX\nPROVIDES FUNCTION GetCallFunctionCount WITH X LANGUAGE C",
+            Some("PROVIDES Loop\n{\n}\n"),
+        );
+        let arith = ThornFacts::scan("IMPLEMENTS: Arith", Some("PROVIDES Arith\n{\n}\n"));
+        let mut set = vec![("Z4c", &z4c), ("ADMBaseX", &admbasex), ("CarpetX", &carpetx)];
+        assert_eq!(unmet(&z4c, set.iter().copied()), [Need::Implementation("TmunuBaseX".into()), Need::Capability("Arith".into())]);
+        set.extend([("TmunuBaseX", &tmunu), ("Arith", &arith)]);
+        assert!(unmet(&z4c, set.iter().copied()).is_empty());
+        assert_eq!(unmet(&z4c, []).len(), 6, "nothing meets anything");
     }
 
     #[test]

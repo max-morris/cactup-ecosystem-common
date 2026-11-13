@@ -255,7 +255,9 @@ pub struct RepoPin {
     /// The pinned content hash (tarball components).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
-    /// The Cactarium package version this commit belongs to, if any.
+    /// The Cactarium package this commit belongs to, if any: `owner/pkg@X.Y.Z` for the version
+    /// that froze it, or `owner/pkg#<sha>` for a commit of the package's repo no version froze
+    /// (which needs format 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cactarium: Option<Slug>,
     /// The tree had local modifications at export (only with an explicit override).
@@ -389,10 +391,13 @@ impl SimFile {
     }
 
     /// The oldest generation that can hold this file: 4 when it is stamped as one sim of a
-    /// multi-sim entry (`owner/name/sim@X.Y.Z`), 3 when an input is a file of the sim's own
-    /// repository, 2 when an input unpacks an archive, else 1.
+    /// multi-sim entry (`owner/name/sim@X.Y.Z`) or a pin is stamped with a commit
+    /// (`owner/pkg#<sha>`), 3 when an input is a file of the sim's own repository, 2 when an input
+    /// unpacks an archive, else 1.
     pub fn required_format(&self) -> u32 {
-        if self.sim.cactarium.as_ref().is_some_and(|s| s.thorn.is_some()) {
+        let names_a_sim = self.sim.cactarium.as_ref().is_some_and(|s| s.thorn.is_some());
+        let commit_stamp = self.repos.iter().any(|r| r.cactarium.as_ref().is_some_and(|s| s.sha.is_some()));
+        if names_a_sim || commit_stamp {
             4
         } else if self.inputs.iter().any(|i| i.repo_file.is_some()) {
             3
@@ -411,7 +416,8 @@ impl SimFile {
         if self.format < self.required_format() {
             return Err(Error::invalid(format!(
                 "format {} cannot hold this file (archive inputs need format 2, repo-file inputs 3, \
-                 a stamp naming one sim of a multi-sim entry 4); it needs format {}",
+                 a stamp naming one sim of a multi-sim entry or a pin stamped with a commit \
+                 (owner/pkg#<sha>) 4); it needs format {}",
                 self.format,
                 self.required_format()
             )));

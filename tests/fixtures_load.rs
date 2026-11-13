@@ -28,6 +28,7 @@ fn every_sim_fixture_loads_and_round_trips() {
         ("sim/v3-full.sim", 3),
         ("sim/v4.sim", 4),
         ("sim/v4-full.sim", 4),
+        ("sim/v4-commit.sim", 4),
     ];
     for (name, format) in all {
         let text = fixture(name);
@@ -59,6 +60,9 @@ fn full_sim_fixtures_hold_everything() {
     let v4 = SimFile::from_toml(&fixture("sim/v4-full.sim")).unwrap();
     assert!(v4.sim.cactarium.as_ref().is_some_and(|s| s.as_sim().unwrap().is_some()), "a stamp naming one sim");
     assert!(v4.inputs.iter().any(|i| i.repo_file.is_some()));
+    let commit = SimFile::from_toml(&fixture("sim/v4-commit.sim")).unwrap();
+    assert!(commit.sim.cactarium.is_none(), "format 4 for a commit stamp alone");
+    assert!(commit.repos.iter().any(|r| r.cactarium.as_ref().is_some_and(|s| s.sha().is_some())), "a pin stamped with a commit");
 }
 
 #[test]
