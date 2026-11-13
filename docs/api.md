@@ -17,6 +17,8 @@ The JSON a Cactarium server and its clients (CactUp) exchange. The types live in
 - Repo URLs are matched with `url::normalize_repo_url`: scheme, login, default ports, a query,
   `.git` and slashes don't count, nor does the host's case; the path's case does, and a local
   path never matches a remote URL. The module docs say exactly what is equal.
+  `url::same_repo_lenient` is the shared fallback that also ignores path case on github.com,
+  gitlab.com and bitbucket.org (counting their `www.` names as them).
 
 ## Endpoints
 
@@ -158,7 +160,7 @@ does: preview first (`dry-run`), then confirm what the preview showed (`expect`)
 {
   "entries": [
     { "slug": "et/cottonmouth", "kind": "package", "file": "cactarium.toml", "tag": "v2026.5.1",
-      "version": "2026.5.1", "rule": "tags vX.Y.Z", "review": "reviewed", "status": "new",
+      "version": "2026.5.1", "rule": "tags vX.Y.Z", "review": "pending", "status": "new",
       "new-versions": 0, "awaiting-review": 0 },
     { "slug": "et/cottonmouth-sims", "kind": "sim", "file": "cactarium-sim.toml", "tag": null,
       "version": null, "rule": "tags sim-vX.Y.Z", "review": null, "status": "skipped",
@@ -173,8 +175,8 @@ does: preview first (`dry-run`), then confirm what the preview showed (`expect`)
   `skipped` (left out by `only`, or the tag isn't one of its versions), `needs-tag` (not every tag
   could be read: name the tag to start from) or `fails` (it can't be registered as it is, so
   nothing is). Why, in `note`.
-- `review`, for a new entry: `reviewed` (its versions wait for an admin's review) or
-  `auto-approved`.
+- `review`, for a new entry: `pending` (its versions wait for an admin's review) or `approved`
+  (they are approved at once), the words `VersionInfo.review` uses.
 - Once registered: `url` (the entry's page), `new-versions` (the tags its first check stored),
   `awaiting-review` (those waiting for review) and the entry's own `warnings` (what its first
   check reported). They default to absent, 0 and empty.

@@ -264,7 +264,9 @@ impl fmt::Display for Need {
 
 /// The hard requirements of a thorn with `facts`: the implementations it inherits from or
 /// befriends, then the capabilities, thorns and functions it requires, each once (compared
-/// case-insensitively, the first spelling kept).
+/// case-insensitively, the first spelling kept). Only CCL names ([`is_ccl_name`]) count: facts
+/// stored by an older scanner may hold other words, which Cactus would refuse and nothing can
+/// meet, so every need has a CCL name and fits a `/providers` query.
 pub fn needs_of(facts: &ThornFacts) -> Vec<Need> {
     let mut v: Vec<Need> = Vec::new();
     v.extend(facts.inherits.iter().chain(&facts.friends).map(|i| Need::Implementation(i.clone())));
@@ -272,7 +274,7 @@ pub fn needs_of(facts: &ThornFacts) -> Vec<Need> {
     v.extend(facts.requires_thorns.iter().map(|t| Need::Thorn(t.clone())));
     v.extend(facts.requires_functions.iter().map(|x| Need::Function(x.clone())));
     let mut seen = std::collections::HashSet::new();
-    v.retain(|n| seen.insert(n.clone()));
+    v.retain(|n| is_ccl_name(n.name()) && seen.insert(n.clone()));
     v
 }
 

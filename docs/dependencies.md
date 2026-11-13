@@ -121,7 +121,8 @@ A sim pins every repo to a commit already; it declares no dependencies. The Cact
 a sim is built on from its pins (repo URL plus commit → `owner/pkg@version`, or `owner/pkg#sha` for
 a commit no version froze) and shows it. A repo URL matches a registered package's by
 `url::normalize_repo_url` (scheme, login, default ports, `.git` and slashes don't count; host
-case doesn't either; path case does). `POST /api/v1/lookup` makes the same derivation for a
+case doesn't either; path case does, with `url::same_repo_lenient` as the shared fallback on
+forges that ignore it). `POST /api/v1/lookup` makes the same derivation for a
 client before it publishes. **Every pin must belong to a registered package**, at a commit that
 package's repo has, or the sim is refused: a downstream user must be able to rebuild it from the
 Cactarium alone.

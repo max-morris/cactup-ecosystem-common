@@ -599,7 +599,8 @@ pub struct RegisteredEntry {
     pub version: Option<String>,
     /// Which tags are its versions, in words: `tags vX.Y.Z from 1.0.0`.
     pub rule: Option<String>,
-    /// For a new entry: `reviewed` (its versions wait for an admin's review) or `auto-approved`.
+    /// For a new entry: `pending` (its versions wait for an admin's review) or `approved` (they
+    /// are approved at once), the words [`VersionInfo::review`] uses.
     pub review: Option<String>,
     /// `new` (registered now, or would be by a dry run), `existing` (on the repo already, left as
     /// it is), `skipped` (not registered now: `only` leaves it out, or the tag named is not one of
@@ -820,6 +821,23 @@ mod tests {
         assert!(two.need().is_err(), "more than one");
         let odd = ProvidersQuery { capability: Some("a&b=c".into()), ..Default::default() };
         assert!(odd.need().is_err() && odd.to_query_string().is_err());
+        // Facts an older scanner stored may hold words that are no CCL names: they make no need,
+        // so every need still round-trips.
+        let old: ThornFacts = serde_json::from_value(serde_json::json!({
+            "implements": "X", "inherits": ["good", "b@d"], "friends": ["F-1"], "requires-functions": ["Get X"],
+            "uses-functions": [], "provides-functions": [], "uses-includes": [], "requires": ["HDF5", "a&b"],
+            "requires-thorns": ["no/pe", "Fine"], "optional": [], "provides": []
+        }))
+        .unwrap();
+        let needs = crate::ccl::needs_of(&old);
+        assert_eq!(
+            needs,
+            [Need::Implementation("good".into()), Need::Capability("HDF5".into()), Need::Thorn("Fine".into())]
+        );
+        for need in &needs {
+            ProvidersQuery::of(need).to_query_string().unwrap();
+        }
+
         // Every need the scanner can give round-trips, leading digits and all.
         let facts = ThornFacts::scan(
             "IMPLEMENTS: X\nINHERITS: 2D_grid, ADMBase\nFRIEND: _Hidden\nREQUIRES FUNCTION F_1",
@@ -870,7 +888,7 @@ mod tests {
         let preview = serde_json::json!({
             "entries": [
                 { "slug": "et/cottonmouth", "kind": "package", "file": "cactarium.toml", "tag": "v2026.5.1",
-                  "version": "2026.5.1", "rule": "tags vX.Y.Z", "review": "reviewed", "status": "new",
+                  "version": "2026.5.1", "rule": "tags vX.Y.Z", "review": "pending", "status": "new",
                   "new-versions": 0, "awaiting-review": 0 },
                 { "slug": "et/cottonmouth-sims", "kind": "sim", "file": "cactarium-sim.toml", "tag": null,
                   "version": null, "rule": "tags sim-vX.Y.Z", "review": null, "status": "skipped",
@@ -889,7 +907,7 @@ mod tests {
         let done: Registered = serde_json::from_value(serde_json::json!({
             "entries": [{ "slug": "et/cottonmouth", "kind": "package", "url": "https://cactarium.org/et/cottonmouth",
                           "file": "cactarium.toml", "tag": "v2026.5.1", "version": "2026.5.1", "rule": "tags vX.Y.Z",
-                          "review": "reviewed", "status": "new", "new-versions": 3, "awaiting-review": 3,
+                          "review": "pending", "status": "new", "new-versions": 3, "awaiting-review": 3,
                           "warnings": ["v2026.11.0 waits for et/carpetx"] },
                         { "slug": "et/old", "kind": "stack", "file": "cactarium-stack.toml", "tag": null,
                           "version": null, "rule": null, "review": null, "status": "existing" }],
