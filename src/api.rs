@@ -7,12 +7,12 @@
 //!
 //! | Request | Response |
 //! |---|---|
-//! | `GET /api/v1/resolve?req=owner/name@[track:]range` | [`Resolved`] |
+//! | `GET /api/v1/resolve?req=owner/name[/sim]@[track:]range` | [`Resolved`] |
 //! | `GET /api/v1/entries/{owner}/{name}` | [`EntryInfo`] |
 //! | `GET /api/v1/packages/{owner}/{name}/versions` | [`PackageVersions`] |
 //! | `GET /api/v1/stacks/{owner}/{name}/releases` | [`StackReleases`] |
 //! | `GET /api/v1/stacks/{owner}/{name}/releases/{version\|head\|master}` | [`crate::stack::FrozenStack`] |
-//! | `GET /api/v1/sims/{owner}/{name}/{N}/download` | the `.sim` bytes, with [`SHA256_HEADER`] |
+//! | `GET /api/v1/sims/{owner}/{name}/{X.Y.Z}/download[?sim=<sim>]` | the `.sim` bytes, with [`SHA256_HEADER`] |
 //! | `POST /api/v1/sims/{owner}/{name}` (bearer token, `.sim` body) | [`Published`] |
 //! | `POST /api/v1/stacks/{owner}/{name}/releases` (bearer token, [`ReleaseRequest`]) | [`Published`] |
 //! | `POST /api/v1/packages/{owner}/{name}/refresh` (bearer token) | [`Refreshed`] |
@@ -20,6 +20,15 @@
 //! For `releases/head` and `releases/master` the [`FrozenStack`](crate::stack::FrozenStack) has
 //! repos without a `commit` (fetch their branch, or for `master` the default branch), its `stack`
 //! is `owner/name@head` or `@master`, and [`UNPINNED_HEADER`] is set.
+//!
+//! **Multi-sim entries.** A sim entry whose manifest lists `[sim.files]` holds several sims per
+//! version, and each is always named: `owner/name/sim[@range]`. `/resolve` takes that form and
+//! answers with the newest version in range that contains the sim ([`Resolved::sim`], and
+//! [`Resolved::newer_without_sim`] when a newer version in range dropped it); the download takes
+//! `?sim=<sim>` ([`SIM_QUERY`]), which such an entry requires. A bare `owner/name` for one is
+//! refused with the list of its sims, and `owner/name/sim` for a one-sim entry is refused too:
+//! the manifest's form, never the count, decides the address. [`EntryInfo::sims`] lists the sims
+//! of the newest version.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +48,8 @@ pub const UNTRUSTED_HEADER: &str = "x-cactarium-untrusted";
 pub const CONTACT_HEADER: &str = "x-cactarium-contact";
 /// The path prefix of every endpoint.
 pub const API_PREFIX: &str = "/api/v1";
+/// The download's query parameter naming one sim of a multi-sim entry.
+pub const SIM_QUERY: &str = "sim";
 
 /// What went wrong, with a message meant to be shown to the user as is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +93,8 @@ pub struct VersionInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Resolved {
-    /// The exact version: `owner/name@[track:]X.Y.Z` (sims included).
+    /// The exact version: `owner/name@[track:]X.Y.Z` (sims included), or
+    /// `owner/name/sim@X.Y.Z` for one sim of a multi-sim entry.
     pub slug: String,
     /// `package`, `stack` or `sim`.
     pub kind: String,
@@ -91,6 +103,15 @@ pub struct Resolved {
     /// Where to go for help or to report problems with this version: its declared contact, else
     /// the repo.
     pub contact: Option<String>,
+    /// The sim chosen, for a multi-sim entry: pass it to the download as `?sim=`. Absent otherwise
+    /// (and from servers before multi-sim entries).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sim: Option<String>,
+    /// For a multi-sim entry: the newest version in the requested range when it is newer than the
+    /// one chosen and no longer contains the sim (it was dropped), so a client can warn. Absent
+    /// when the chosen version is the newest in range.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub newer_without_sim: Option<String>,
     #[serde(flatten)]
     pub version: VersionInfo,
 }
@@ -111,6 +132,10 @@ pub struct EntryInfo {
     /// Track names, the default track as "".
     pub tracks: Vec<String>,
     pub versions: Vec<String>,
+    /// For a multi-sim entry: the sims of its newest version, each addressed `owner/name/sim`.
+    /// Empty otherwise (and from servers before multi-sim entries).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sims: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,6 +271,8 @@ mod tests {
             kind: "package".into(),
             url: Some("https://github.com/max-morris/CarpetX.git".into()),
             contact: Some("https://github.com/max-morris/CarpetX/issues".into()),
+            sim: None,
+            newer_without_sim: None,
             version: VersionInfo {
                 version: "mixed-precision:1.4.0".into(),
                 track: Some("mixed-precision".into()),
@@ -262,7 +289,23 @@ mod tests {
         let j = serde_json::to_value(&r).unwrap();
         assert_eq!(j["commit"], "3f2c9e1a00112233445566778899aabbccddeeff");
         assert_eq!(j["yank-reason"], serde_json::Value::Null);
+        assert!(j.get("sim").is_none() && j.get("newer-without-sim").is_none(), "absent unless a multi-sim entry");
         assert_eq!(serde_json::from_value::<Resolved>(j).unwrap(), r);
+    }
+
+    /// One sim of a multi-sim entry, chosen below a newer version that dropped it.
+    #[test]
+    fn resolved_names_the_sim() {
+        let j = serde_json::json!({
+            "slug": "et/cottonmouth-sims/qc0-z4c@1.0.0", "kind": "sim", "url": null, "contact": null,
+            "sim": "qc0-z4c", "newer-without-sim": "1.1.0",
+            "version": "1.0.0", "track": null, "tag": "sim-v1.0.0", "commit": null, "tree": null,
+            "yanked": false, "yank-reason": null, "state": "ok", "curated": false, "published": 0
+        });
+        let r: Resolved = serde_json::from_value(j).unwrap();
+        assert_eq!(r.sim.as_deref(), Some("qc0-z4c"));
+        assert_eq!(r.newer_without_sim.as_deref(), Some("1.1.0"));
+        assert_eq!(r.version.tag.as_deref(), Some("sim-v1.0.0"));
     }
 
     #[test]

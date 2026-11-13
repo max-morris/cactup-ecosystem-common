@@ -12,7 +12,7 @@
 //! - [`par`]: which parts of a parfile are comments, and which `@NAME@` / `@KNOB(...)@` /
 //!   `@ENV(...)@` tokens it uses, lexed exactly as cactup substitutes them.
 //! - [`name`], [`version`], [`slug`]: owner/name identifiers, track-namespaced semver, and the
-//!   `owner/name[/Thorn][@...]` references users type.
+//!   `owner/name[/Thorn|/sim][@...]` references users type.
 //!
 //! Every format carries a top-level `format` generation. Readers are strict: unknown keys are an
 //! error, and a generation newer than this crate knows is rejected with an upgrade message (the
@@ -39,10 +39,15 @@ pub use error::{Error, Result};
 /// back to 1, and writes the oldest one that can hold a file's content
 /// ([`sim::SimFile::required_format`]), so a file that needs nothing new stays readable by
 /// older readers. Generation 2 added archive inputs (`unpack`, `path`, `[[input.fixup]]`);
-/// generation 3, inputs that are a file of the sim's own repository (`repo-file`).
-pub const SIM_FORMAT: u32 = 3;
-/// The `cactarium.toml` format generation this crate reads and writes.
-pub const MANIFEST_FORMAT: u32 = 1;
+/// generation 3, inputs that are a file of the sim's own repository (`repo-file`); generation 4,
+/// a `[sim] cactarium` stamp naming one sim of a multi-sim entry (`owner/name/sim@X.Y.Z`), which a
+/// reader from before it would take for a thorn.
+pub const SIM_FORMAT: u32 = 4;
+/// The newest manifest format generation (`cactarium.toml`, `cactarium-stack.toml`,
+/// `cactarium-sim.toml`) this crate reads. It reads every generation back to 1; a manifest must
+/// declare at least the generation its content needs ([`manifest::Manifest::required_format`]).
+/// Generation 2 added `[sim.files]`: several sims released together from one repo.
+pub const MANIFEST_FORMAT: u32 = 2;
 /// The frozen-stack format generation this crate reads: the `format` of a stack release
 /// ([`stack::FrozenStack`]) the Cactarium serves. A client checks a response's `format` against
 /// this before the typed parse, so a release from a newer server says "upgrade" rather than

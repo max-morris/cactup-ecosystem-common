@@ -26,6 +26,8 @@ fn every_sim_fixture_loads_and_round_trips() {
         ("sim/v2-full.sim", 2),
         ("sim/v3.sim", 3),
         ("sim/v3-full.sim", 3),
+        ("sim/v4.sim", 4),
+        ("sim/v4-full.sim", 4),
     ];
     for (name, format) in all {
         let text = fixture(name);
@@ -35,7 +37,7 @@ fn every_sim_fixture_loads_and_round_trips() {
         assert_eq!(sim.required_format(), format, "{name} holds exactly what its generation adds");
         assert_eq!(sim.to_toml().unwrap(), text, "{name} is not written back byte for byte");
     }
-    assert_eq!(SIM_FORMAT, 3, "a new generation needs its fixtures: add sim/v4.sim and v4-full.sim and list them above");
+    assert_eq!(SIM_FORMAT, 4, "a new generation needs its fixtures: add sim/v5.sim and v5-full.sim and list them above");
 }
 
 /// The `-full` fixtures really hold every optional table and key of their generation.
@@ -54,6 +56,9 @@ fn full_sim_fixtures_hold_everything() {
     let v3 = SimFile::from_toml(&fixture("sim/v3-full.sim")).unwrap();
     assert!(v3.inputs.iter().any(|i| i.repo_file.is_some() && !i.unpack));
     assert!(v3.inputs.iter().any(|i| i.repo_file.is_some() && i.unpack));
+    let v4 = SimFile::from_toml(&fixture("sim/v4-full.sim")).unwrap();
+    assert!(v4.sim.cactarium.as_ref().is_some_and(|s| s.as_sim().unwrap().is_some()), "a stamp naming one sim");
+    assert!(v4.inputs.iter().any(|i| i.repo_file.is_some()));
 }
 
 #[test]
@@ -77,7 +82,15 @@ fn every_manifest_generation_loads() {
     let m = Manifest::from_repo_file(SIM_FILE, &text).unwrap();
     let sim = m.sim.unwrap();
     assert!(sim.description.is_some() && sim.contact.is_some() && sim.tag_pattern.is_some() && sim.since.is_some());
-    assert_eq!(MANIFEST_FORMAT, 1, "a new generation needs its fixture: add manifest/v2.toml and list it above");
+    // v2-sim.toml: a multi-sim `cactarium-sim.toml` ([sim.files], format 2), written back byte for byte.
+    let text = fixture("manifest/v2-sim.toml");
+    let m = Manifest::from_repo_file(SIM_FILE, &text).unwrap();
+    assert_eq!(m.format, 2);
+    assert_eq!(m.required_format(), 2);
+    assert_eq!(m.to_toml().unwrap(), text);
+    let sim = m.sim.unwrap();
+    assert!(sim.file.is_none() && sim.files.len() == 2);
+    assert_eq!(MANIFEST_FORMAT, 2, "a new generation needs its fixture: add manifest/v3-*.toml and list it above");
 }
 
 /// A newer manifest is refused with the upgrade message, an older one is not "unknown".

@@ -176,6 +176,10 @@ impl StackSection {
             if o.package.is_none() && !git {
                 return Err(Error::invalid(format!("override of '{}' changes nothing", o.repo)));
             }
+            // A package reference: a third segment, if any, is a thorn, as before slugs widened.
+            if let Some(p) = &o.package {
+                p.as_thorn()?;
+            }
         }
         for t in self.enable.iter().chain(&self.disable) {
             if !arr_thorn(t) {

@@ -1,0 +1,34 @@
+format = 2
+
+[sim]
+name = "bhns-sims"
+owners = ["example", "example-org"]
+description = "A binary neutron star merger, ready to run."
+contact = "mailto:help@example.org"
+tag-pattern = "sim_{major}_{minor}_v{patch}"
+since = "1.0.0"
+
+[sim.files]
+bhns-full = "sims/bhns.sim"
+bhns-gpu = "sims/bhns-gpu.sim"
+
+[tracks.mixed-precision]
+description = "The mixed-precision line"
+
+[[fork-of]]
+target = "upstream/bhns"
+note = "Adds a GPU parfile"
+
+[[dependency]]
+target = "example/carpetx@>=1.0.0, <2.0.0"
+note = "Needs the new driver"
+
+[[works-with]]
+target = "example/stack@mixed-precision:^1.2"
+
+[[incompatible-with]]
+target = "other/thing"
+
+[[caveat]]
+thorn = "CarpetX/CarpetX"
+note = "Needs CUDA 12"
