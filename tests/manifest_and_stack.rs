@@ -657,3 +657,51 @@ fn a_library_package_is_placed_by_the_package_that_uses_it() {
     let stack = "format = 1\n[stack]\nname = \"s\"\nowners = [\"o\"]\nextends = [\"et/et@2026.5.0\"]\n[[dependency]]\ntarget = \"et/fuka\"\ninto = \"src/fuka\"\n";
     assert!(Manifest::from_toml(stack).unwrap_err().to_string().contains("only a [package] places a library"));
 }
+
+/// A frozen stack's pins are labeled as a `.sim`'s are: `owner/pkg@<exact version>` or a bare
+/// `owner/pkg`, never a commit, range, tip or thorn, and never on a download.
+#[test]
+fn frozen_stack_pin_labels() {
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/stack/v1-full.json")).unwrap();
+    let mut stack: FrozenStack = serde_json::from_str(&text).unwrap();
+    let git = stack.repos.iter().position(|r| r.commit.is_some()).unwrap();
+    let download = stack.repos.iter().position(|r| r.sha256.is_some()).unwrap();
+    for ok in ["example/carpetx", "example/carpetx@1.0.0", "example/carpetx@mp:1.0.0"] {
+        stack.repos[git].cactarium = Some(ok.parse().unwrap());
+        stack.validate().unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for bad in ["example/carpetx#3f2c9e1", "example/carpetx@^1", "example/carpetx@head", "example/carpetx/CarpetX"] {
+        stack.repos[git].cactarium = Some(bad.parse().unwrap());
+        assert!(stack.validate().is_err(), "{bad}");
+    }
+    stack.repos[git].cactarium = None;
+    stack.repos[download].cactarium = Some("example/carpetx".parse().unwrap());
+    assert!(stack.validate().unwrap_err().to_string().contains("labels a download"));
+}
+
+/// A generated fork-of is exact, on the upstream version's own track: `=2026.5.1`, or
+/// `mixed-precision:=1.2.0` (never `=mixed-precision:1.2.0`, which is no range).
+#[test]
+fn generated_fork_of_is_exact_on_its_track() {
+    use cactup_ecosystem_common::manifest::ForkOf;
+    use cactup_ecosystem_common::version::{TrackedReq, TrackedVersion};
+    let upstream: cactup_ecosystem_common::slug::Slug = "et/carpet".parse().unwrap();
+    for (version, target) in [
+        ("2026.5.1", "et/carpet@=2026.5.1"),
+        ("mixed-precision:1.2.0", "et/carpet@mixed-precision:=1.2.0"),
+        ("1.0.0-rc.1", "et/carpet@=1.0.0-rc.1"),
+    ] {
+        let v: TrackedVersion = version.parse().unwrap();
+        let f = ForkOf::exactly(&upstream, &v);
+        assert_eq!(f.target.to_string(), target);
+        let req = f.target.req().unwrap();
+        assert!(req.is_exact() && req.matches(&v), "{target}");
+        assert_eq!(req, TrackedReq::exactly(&v));
+        let other: TrackedVersion = "2026.5.2".parse().unwrap();
+        assert!(!req.matches(&other), "{target} is exact");
+        // It reads back from a manifest as written.
+        let text = format!("format = 1\n[package]\nname = \"carpet\"\nowners = [\"steve\"]\n\n[[fork-of]]\ntarget = \"{target}\"\n");
+        let m = Manifest::from_repo_file("cactarium.toml", &text).unwrap_or_else(|e| panic!("{target}: {e}"));
+        assert_eq!(m.fork_of[0].target.to_string(), target);
+    }
+}
