@@ -35,7 +35,7 @@ The JSON a Cactarium server and its clients (CactUp) exchange. The types live in
 | `POST /stacks/{owner}/{name}/releases` (bearer, `ReleaseRequest`) | `Published` |
 | `POST /packages/{owner}/{name}/refresh` (bearer) | `Refreshed` |
 | `POST /lookup` (`LookupRequest`) | `LookedUp` |
-| `GET /providers?implements=…` (or `capability=`, `function=`, `thorn=`) | `Providers` |
+| `GET /providers?implements=…` (or `capability=`, `function=`, `thorn=`, `include=`) | `Providers` |
 | `POST /repos` (bearer, `RegisterRequest`) | `Registered`; 409 `conflict` when `expect` no longer matches |
 | `GET /whoami` (bearer) | `WhoAmI` |
 | `POST /downloads` (bearer, `DownloadSubmission`) | `DownloadReview`; 409 `DownloadConflict` when known |
@@ -126,7 +126,9 @@ unambiguous shape.
 ## `GET /providers`: what meets a requirement
 
 Exactly one of `implements`, `capability`, `function` or `thorn`, a CCL name
-(`[A-Za-z0-9_]+`, so it never needs escaping). Each is one `ccl::Need` (`ProvidersQuery::of`,
+(`[A-Za-z0-9_]+`, so it never needs escaping), or `include`, an include name (`[A-Za-z0-9_.-]+`,
+not starting with `.`; newer than the rest, so a server from before it answers that none was
+given). Each is one `ccl::Need` (`ProvidersQuery::of`,
 `ProvidersQuery::need`), and the server answers with `ccl::meets`, so a client asks about exactly
 what `ccl::unmet` left unmet; every need `ccl::needs_of` gives round-trips.
 

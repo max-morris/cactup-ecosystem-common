@@ -18,7 +18,7 @@
 //! | `POST /api/v1/stacks/{owner}/{name}/releases` (bearer token, [`ReleaseRequest`]) | [`Published`] |
 //! | `POST /api/v1/packages/{owner}/{name}/refresh` (bearer token) | [`Refreshed`] |
 //! | `POST /api/v1/lookup` ([`LookupRequest`]) | [`LookedUp`] |
-//! | `GET /api/v1/providers?implements=…\|capability=…\|function=…\|thorn=…` ([`ProvidersQuery`]) | [`Providers`] |
+//! | `GET /api/v1/providers?implements=…\|capability=…\|function=…\|thorn=…\|include=…` ([`ProvidersQuery`]) | [`Providers`] |
 //! | `POST /api/v1/repos` (bearer token, [`RegisterRequest`]) | [`Registered`] (every entry `existing` when there is nothing to add); 409 `conflict` when `expect` no longer matches |
 //! | `GET /api/v1/whoami` (bearer token) | [`WhoAmI`] |
 //! | `POST /api/v1/downloads` (bearer token, [`DownloadSubmission`]) | [`DownloadReview`]; 409 [`DownloadConflict`] when it is known |
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 
 use serde::Deserializer;
 
-use crate::ccl::{Need, ThornFacts, is_ccl_name};
+use crate::ccl::{Need, ThornFacts, is_ccl_name, is_include_name};
 use crate::slug::is_commit_id;
 use crate::{Error, Result};
 
@@ -440,7 +440,8 @@ pub struct DownloadInfo {
 }
 
 /// `GET /providers`: the thorns of published packages that meet one CCL requirement. Exactly one
-/// of the four is given. Each maps to a [`Need`] ([`ProvidersQuery::need`], [`ProvidersQuery::of`]),
+/// of the five is given (`include` is newer than the rest: a server from before it answers that
+/// none was given). Each maps to a [`Need`] ([`ProvidersQuery::need`], [`ProvidersQuery::of`]),
 /// and the server answers with [`crate::ccl::meets`].
 ///
 /// The answer covers, for each package and track, the newest version this request may be served
@@ -462,6 +463,9 @@ pub struct ProvidersQuery {
     /// Thorns of that name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thorn: Option<String>,
+    /// Thorns that provide the header (`INCLUDE[S] ...: x IN` it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<String>,
 }
 
 impl ProvidersQuery {
@@ -473,25 +477,35 @@ impl ProvidersQuery {
             Need::Capability(_) => ProvidersQuery { capability: name, ..Default::default() },
             Need::Function(_) => ProvidersQuery { function: name, ..Default::default() },
             Need::Thorn(_) => ProvidersQuery { thorn: name, ..Default::default() },
+            Need::Include(_) => ProvidersQuery { include: name, ..Default::default() },
         }
     }
 
     /// The requirement asked about: exactly one parameter, a CCL name ([`is_ccl_name`], the rule
-    /// the scanner keeps names by, so every need [`crate::ccl::needs_of`] gives round-trips).
+    /// the scanner keeps names by, so every need [`crate::ccl::needs_of`] gives round-trips), or
+    /// for `include` an include name ([`is_include_name`]).
     pub fn need(&self) -> Result<Need> {
         let given: Vec<Need> = [
             self.implements.clone().map(Need::Implementation),
             self.capability.clone().map(Need::Capability),
             self.function.clone().map(Need::Function),
             self.thorn.clone().map(Need::Thorn),
+            self.include.clone().map(Need::Include),
         ]
         .into_iter()
         .flatten()
         .collect();
         let [need] = <[Need; 1]>::try_from(given)
-            .map_err(|_| Error::invalid("give exactly one of implements, capability, function or thorn"))?;
-        if !is_ccl_name(need.name()) {
-            return Err(Error::invalid(format!("'{}' is not a CCL name", need.name())));
+            .map_err(|_| Error::invalid("give exactly one of implements, capability, function, thorn or include"))?;
+        match &need {
+            Need::Include(h) if !is_include_name(h) => {
+                return Err(Error::invalid(format!("'{h}' is not an include name")));
+            }
+            Need::Include(_) => {}
+            _ if !is_ccl_name(need.name()) => {
+                return Err(Error::invalid(format!("'{}' is not a CCL name", need.name())));
+            }
+            _ => {}
         }
         Ok(need)
     }
@@ -505,6 +519,7 @@ impl ProvidersQuery {
             Need::Capability(_) => "capability",
             Need::Function(_) => "function",
             Need::Thorn(_) => "thorn",
+            Need::Include(_) => "include",
         };
         Ok(format!("{key}={}", need.name()))
     }
@@ -816,6 +831,13 @@ mod tests {
             assert_eq!(ProvidersQuery::of(&need).need().unwrap(), need);
         }
         assert_eq!(ProvidersQuery::of(&Need::Capability("HDF5".into())).to_query_string().unwrap(), "capability=HDF5");
+        let header = Need::Include("TP_Guts.h".into());
+        assert_eq!(ProvidersQuery::of(&header).to_query_string().unwrap(), "include=TP_Guts.h");
+        assert_eq!(ProvidersQuery::of(&header).need().unwrap(), header);
+        let climbing = ProvidersQuery { include: Some("../x.h".into()), ..Default::default() };
+        assert!(climbing.need().is_err(), "an include name never climbs");
+        let dotted = ProvidersQuery { thorn: Some("a.h".into()), ..Default::default() };
+        assert!(dotted.need().is_err(), "a thorn's name is still a CCL name");
         assert!(ProvidersQuery::default().need().is_err(), "none");
         let two = ProvidersQuery { implements: Some("A".into()), thorn: Some("B".into()), ..Default::default() };
         assert!(two.need().is_err(), "more than one");

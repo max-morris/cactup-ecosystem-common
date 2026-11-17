@@ -145,14 +145,28 @@ with this crate's `needs_of` and `meets`, so they cannot disagree about what a t
 | `Capability(c)` | `REQUIRES c` (configuration.ccl) | `PROVIDES c` |
 | `Thorn(t)` | `REQUIRES THORNS: t` | is named `t` |
 | `Function(f)` | `REQUIRES FUNCTION f` | `PROVIDES FUNCTION f` (the alias, not the providing routine) |
+| `Include(h)` | `USES INCLUDE: h`, and a source `#include`s `h` outside any conditional | `INCLUDE[S] ...: x IN h` |
 
 - Names compare case-insensitively, as Cactus compares them, and so do `Need`s themselves
   (`Need::key`); each need is listed once. Only CCL names (`[A-Za-z0-9_]+`, `ccl::is_ccl_name`)
   are read as names, so every need fits a `/providers` query.
 - A thorn without an `IMPLEMENTS` line implements nothing (Cactus refuses to build one), so it
   never meets an implementation need, even one spelled like its own name.
-- Not needs: `OPTIONAL` capabilities, `USES FUNCTION`, and `USES INCLUDE` (no facts say which
-  thorn provides an include yet). A capability's version constraint (`HDF5(>=1.10)`) isn't read.
+- Not needs: `OPTIONAL` capabilities, `USES FUNCTION`, and a `USES INCLUDE` header the sources
+  include only under `#if`/`#ifdef` (Carpet's `nompi.h` under `#ifndef CCTK_MPI`), or not at all.
+  A capability's version constraint (`HDF5(>=1.10)`) isn't read.
+- `Include` is the one need read from the sources, not the CCL (`ThornFacts::scan_sources`, which
+  `scan_tree` runs): Cactus makes the header a thorn includes from every provider in the
+  configuration, and from none it is empty, so an unconditional `#include` of a header nothing
+  provides fails to compile (EinsteinInitialData/TwoPuncturesX without TwoPunctures). An include
+  guard (`#ifndef X` then `#define X`) is no conditional. It counts against a set only where some
+  thorn the checker knows of provides the header (`ccl::counts`, `ccl::unmet_among`): a header
+  nothing provides compiles empty, which is how hooks work (ADMMacros' `CalcTmunu.inc`, Carpet's
+  `Requirements.hh`), or reaches the thorn through a capability's include directory. Checked
+  against every config built in an ET 2026_05 tree, this flags nothing; against the
+  et/cottonmouth-sims 2026.5.1 thornlist it flags exactly TwoPuncturesX. Facts stored before
+  `provides-includes`/`needs-includes` existed read as providing and needing no header: rescan
+  them before checking a set against them.
 - `unmet(facts, thorns)` lists the needs a set of thorns leaves unmet. `GET /api/v1/providers`
   answers "which published thorns meet this need" (`api::ProvidersQuery::of(&need)`).
 
