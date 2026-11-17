@@ -1,6 +1,6 @@
 use cactup_ecosystem_common::Error;
 use cactup_ecosystem_common::sim::{
-    ArchiveKind, Fixup, Input, ParfileKind, Parfile, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified,
+    ArchiveKind, Fixup, Input, ParfileKind, Parfile, Provenance, RepoPin, SimFile, SimMeta, ThornlistText, Unspecified,
 };
 
 const SHA: &str = "3f2c9e1a00112233445566778899aabbccddeeff";
@@ -325,13 +325,82 @@ fn a_three_part_stamp_needs_format_4() {
     let err = SimFile::from_toml(&claims_3).unwrap_err().to_string();
     assert!(err.contains("needs format 4"), "{err}");
 
-    // A pin's package reference keeps the thorn rules for its third segment.
+    // A pin's label never has a third segment.
     let mut pinned = sample("x\n", "y\n");
     pinned.repos[0].cactarium = Some("max-morris/carpetx/qc0-z4c@1.0.0".parse().unwrap());
-    assert!(pinned.validate().unwrap_err().to_string().contains("not a thorn name"));
+    assert!(pinned.validate().unwrap_err().to_string().contains("names a thorn or sim"));
 
     // The stamp's third segment is a sim name: lowercase, starting with a letter.
     let thorn_like = text.replace("qc0-z4c@", "Qc0@");
     let err = SimFile::from_toml(&thorn_like).unwrap_err().to_string();
     assert!(err.contains("[sim] cactarium"), "{err}");
+}
+
+/// A pin's `cactarium` is a label: `owner/pkg@<exact version>` when a version froze its commit,
+/// else a bare `owner/pkg` (the pin's `commit` says which commit). Both are format 1; nothing else
+/// is a pin label.
+#[test]
+fn pin_labels_are_a_package_or_one_of_its_versions() {
+    let mut sim = sample("x\n", "y\n");
+    for ok in ["max-morris/carpetx@mixed-precision:1.4.0", "max-morris/carpetx@1.4.0", "max-morris/carpetx@1.4.0-rc.1", "max-morris/carpetx"] {
+        sim.repos[0].cactarium = Some(ok.parse().unwrap());
+        let text = sim.to_toml().unwrap_or_else(|e| panic!("{ok}: {e}"));
+        assert!(text.starts_with("format = 1\n"), "{ok} needs nothing new: {text}");
+        assert_eq!(SimFile::from_toml(&text).unwrap(), SimFile { format: 1, ..sim.clone() });
+    }
+    for bad in [
+        format!("max-morris/carpetx#{SHA}"),
+        "max-morris/carpetx#3f2c9e1".to_owned(),
+        "max-morris/carpetx/CarpetX#3f2c9e1".to_owned(),
+        "max-morris/carpetx/CarpetX@1.4.0".to_owned(),
+        "max-morris/carpetx/CarpetX".to_owned(),
+        "max-morris/carpetx@^1.4".to_owned(),
+        "max-morris/carpetx@~1.4.0".to_owned(),
+        "max-morris/carpetx@1.4".to_owned(),
+        "max-morris/carpetx@mixed-precision".to_owned(),
+        "max-morris/carpetx@head".to_owned(),
+        "max-morris/carpetx@master".to_owned(),
+        "max-morris/carpetx@3f2c9e1a0011".to_owned(),
+    ] {
+        sim.repos[0].cactarium = Some(bad.parse().unwrap());
+        let err = sim.validate().unwrap_err().to_string();
+        assert!(err.contains("repo 'carpetx': cactarium"), "{bad}: {err}");
+        assert!(sim.to_toml().is_err(), "{bad} is never written");
+    }
+
+    // Only a git repo belongs to a package, never a download; an unpinned one keeps its label
+    // (such a file can't be published anyway).
+    sim.repos[0].cactarium = Some("max-morris/carpetx@1.4.0".parse().unwrap());
+    sim.repos[0].commit = None;
+    sim.repos[0].sha256 = Some("ab".repeat(32));
+    assert!(sim.validate().unwrap_err().to_string().contains("labels a download"));
+    sim.repos[0].sha256 = None;
+    sim.validate().unwrap();
+    assert!(!sim.is_fully_specified());
+}
+
+/// The sim's own stamp is a version, and a base stack a release or a tip: neither names a commit.
+#[test]
+fn stamps_and_bases_never_name_a_commit() {
+    let mut sim = sample("x\n", "y\n");
+    sim.sim.cactarium = Some("et/qc0-demo#3f2c9e1".parse().unwrap());
+    assert!(sim.validate().unwrap_err().to_string().contains("[sim] cactarium"));
+    sim.sim.cactarium = None;
+    sim.provenance = Some(Provenance {
+        exported_by: None,
+        exported_at: None,
+        machine: None,
+        flavor: None,
+        optionlist: None,
+        universe: None,
+        flags: vec![],
+        machine_disabled: vec![],
+        base: Some("et/cottonmouth-stack#3f2c9e1".parse().unwrap()),
+        extra: Default::default(),
+    });
+    assert!(sim.validate().unwrap_err().to_string().contains("[provenance] base"));
+    for ok in ["et/cottonmouth-stack@1.0.0", "et/cottonmouth-stack@head", "et/cottonmouth-stack@master"] {
+        sim.provenance.as_mut().unwrap().base = Some(ok.parse().unwrap());
+        sim.validate().unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
 }

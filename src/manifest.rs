@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use crate::name::{Name, Owner, SimName};
 use crate::slug::Slug;
 use crate::stack::StackSection;
-use crate::version::{DEFAULT_TRACK_KEYWORD, TrackName, TrackedVersion};
+use crate::version::{DEFAULT_TRACK_KEYWORD, TrackName, TrackedReq, TrackedVersion};
 use crate::{Error, MANIFEST_FORMAT, Result, generation};
 
 /// The package manifest's file name, at the repo root.
@@ -249,6 +249,21 @@ pub struct ForkOf {
 }
 
 impl ForkOf {
+    /// The declaration CactUp generates for a detected fork: exactly `version` of `upstream`
+    /// (`owner/name`), the newest upstream version whose frozen commit the fork's history
+    /// contains. `et/carpet@=2026.5.1`, or `et/carpet@mixed-precision:=1.2.0` on a track
+    /// ([`TrackedReq::exactly`]).
+    pub fn exactly(upstream: &Slug, version: &TrackedVersion) -> ForkOf {
+        let target = Slug {
+            owner: upstream.owner.clone(),
+            name: upstream.name.clone(),
+            thorn: None,
+            at: Some(TrackedReq::exactly(version).to_string()),
+            sha: None,
+        };
+        ForkOf { target, note: None }
+    }
+
     /// Whether this fork satisfies `dep`, a dependency on the same upstream package: some
     /// published version of the upstream (`published`: each version with its commit) is one the
     /// dependency accepts and one the fork is a drop-in for. A dependency on one commit is
