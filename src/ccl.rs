@@ -36,7 +36,7 @@ pub struct ThornFacts {
     pub requires: Vec<String>,
     /// Thorns from `REQUIRES THORNS:`.
     pub requires_thorns: Vec<String>,
-    /// Capabilities from `OPTIONAL`.
+    /// Capabilities from `OPTIONAL` and `OPTIONAL_IFACTIVE`.
     pub optional: Vec<String>,
     /// Capabilities from `PROVIDES`.
     pub provides: Vec<String>,
@@ -187,7 +187,9 @@ impl ThornFacts {
                     } else {
                         f.requires.extend(words(rest).filter_map(|w| bare_capability(&w)));
                     }
-                } else if let Some(rest) = after_keyword(&line, "OPTIONAL") {
+                } else if let Some(rest) =
+                    after_keyword(&line, "OPTIONAL_IFACTIVE").or_else(|| after_keyword(&line, "OPTIONAL"))
+                {
                     f.optional.extend(words(rest).filter_map(|w| bare_capability(&w)));
                 } else if let Some(rest) = after_keyword(&line, "PROVIDES") {
                     f.provides.extend(words(rest).filter_map(|w| bare_capability(&w)).take(1));
@@ -228,6 +230,8 @@ impl ThornFacts {
             return;
         }
         let mut found: Vec<String> = Vec::new();
+        // Macros the sources test (`#ifdef X`, `defined(X)`), normalized.
+        let mut tested: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut budget = MAX_SOURCE_FILES;
         let mut stack = vec![thorn_dir.join("src")];
         while let Some(dir) = stack.pop() {
@@ -248,6 +252,7 @@ impl ThornFacts {
                     }
                     budget -= 1;
                     let Some(text) = read_bounded(&e.path(), MAX_SOURCE_BYTES) else { continue };
+                    tested.extend(tested_macros(&text).iter().map(|m| guard_key(m)));
                     for inc in unguarded_includes(&text) {
                         if self.uses_includes.contains(&inc) && !found.contains(&inc) {
                             found.push(inc);
@@ -256,9 +261,14 @@ impl ThornFacts {
                 }
             }
         }
-        // In the order interface.ccl declares them.
-        self.needs_includes =
-            self.uses_includes.iter().filter(|u| found.contains(u) && is_include_name(u)).cloned().collect();
+        // In the order interface.ccl declares them. A header whose own guard
+        // macro the sources test (`#include "http_Content.h"`, then
+        // `#ifdef __HTTP_CONTENT_H__`) is used only when a provider filled it:
+        // included, but not needed.
+        self.needs_includes = (self.uses_includes.iter())
+            .filter(|u| found.contains(u) && is_include_name(u) && !tested.contains(&guard_key(u)))
+            .cloned()
+            .collect();
     }
 }
 
@@ -276,6 +286,39 @@ fn is_source(name: &str) -> bool {
         "c" | "cc" | "cxx" | "cpp" | "C" | "h" | "hh" | "hxx" | "hpp" | "inc" | "cu" | "cuh" | "F" | "F90" | "F77"
             | "f" | "f90" | "f77"
     )
+}
+
+/// The macros `text` tests: `#ifdef X`, `#ifndef X`, and each `defined(X)` / `defined X` of an
+/// `#if` or `#elif`.
+fn tested_macros(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(d) = line.trim_start().strip_prefix('#') else { continue };
+        let d = d.trim_start();
+        if let Some(rest) = d.strip_prefix("ifdef").or_else(|| d.strip_prefix("ifndef")) {
+            out.extend(rest.split_whitespace().next().map(str::to_owned));
+        } else if d.starts_with("if") || d.starts_with("elif") {
+            let mut rest = d;
+            while let Some(i) = rest.find("defined") {
+                rest = &rest[i + "defined".len()..];
+                let name: String = rest
+                    .trim_start_matches(|c: char| c.is_whitespace() || c == '(')
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// What a header name and its guard macro share: `http_Content.h` and `__HTTP_CONTENT_H__` both
+/// read `HTTPCONTENTH`.
+fn guard_key(name: &str) -> String {
+    name.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_uppercase()).collect()
 }
 
 /// The `#include "x"` and `#include <x>` names in `text` that no preprocessor conditional
@@ -468,21 +511,36 @@ where
     needs_of(facts).into_iter().filter(|need| !thorns.clone().any(|(name, f)| meets(name, f, need))).collect()
 }
 
-/// Whether an unmet `need` counts against a set, given every thorn the checker knows of (`known`:
-/// the registry's packages, an installation's repos). An [`Need::Include`] counts only where some
-/// thorn of `known` provides the header: Cactus compiles a header that nothing provides as an
-/// empty one, which is how a hook others may fill works (ADMMacros' `CalcTmunu.inc`, Carpet's
-/// `Requirements.hh`), and a header can reach a thorn another way (a capability's include
-/// directory). One a known thorn provides is that thorn's code, and an empty stand-in for it does
+/// Whether an unmet `need` of the thorn with `facts` counts against a set, given every thorn the
+/// checker knows of (`known`: the registry's packages, an installation's repos). An
+/// [`Need::Include`] counts only where some thorn of `known` provides the header, and none of
+/// those is optional to the thorn:
+/// - Cactus compiles a header that nothing provides as an empty one, which is how a hook others
+///   may fill works (ADMMacros' `CalcTmunu.inc`, Carpet's `Requirements.hh`), and a header can
+///   reach a thorn another way (a capability's include directory).
+/// - A provider that `PROVIDES` or `IMPLEMENTS` something the thorn declares `OPTIONAL` (or
+///   `OPTIONAL_IFACTIVE`) is one it builds without, using the header only when it is there
+///   (Slab's `loopcontrol.h`, GRHydro's `carpet.hh`).
+///
+/// One a known thorn provides otherwise is that thorn's code, and an empty stand-in for it does
 /// not compile (EinsteinInitialData/TwoPuncturesX without TwoPunctures). Every other need always
 /// counts.
-pub fn counts<'a>(need: &Need, known: impl IntoIterator<Item = &'a ThornFacts>) -> bool {
-    match need {
-        Need::Include(h) => {
-            known.into_iter().any(|f| f.provides_includes.iter().any(|p| p.eq_ignore_ascii_case(h)))
+pub fn counts<'a>(facts: &ThornFacts, need: &Need, known: impl IntoIterator<Item = &'a ThornFacts>) -> bool {
+    let Need::Include(h) = need else { return true };
+    let optional = |p: &ThornFacts| {
+        facts.optional.iter().any(|o| {
+            p.provides.iter().any(|c| c.eq_ignore_ascii_case(o))
+                || p.implements.as_deref().is_some_and(|i| i.eq_ignore_ascii_case(o))
+        })
+    };
+    let mut provided = false;
+    for p in known.into_iter().filter(|p| p.provides_includes.iter().any(|x| x.eq_ignore_ascii_case(h))) {
+        if optional(p) {
+            return false;
         }
-        _ => true,
+        provided = true;
     }
+    provided
 }
 
 /// [`unmet`], keeping only the needs that count given the thorns of `known` ([`counts`]): what a
@@ -495,7 +553,7 @@ where
     K::IntoIter: Clone,
 {
     let known = known.into_iter();
-    unmet(facts, thorns).into_iter().filter(|need| counts(need, known.clone())).collect()
+    unmet(facts, thorns).into_iter().filter(|need| counts(facts, need, known.clone())).collect()
 }
 
 /// A thorn found in a source tree.
@@ -786,10 +844,11 @@ PROVIDES CarpetX
         std::fs::create_dir_all(root.join("src/.hidden")).unwrap();
         std::fs::write(root.join("src/a.cc"), "#include \"TP_Guts.h\"\n#include \"unused_by_ccl.h\"\n").unwrap();
         std::fs::write(root.join("src/sub/b.F90"), "#ifdef X\n#include \"opt.h\"\n#endif\n").unwrap();
+        std::fs::write(root.join("src/c.cc"), "#include \"http_Content.h\"\n#if 1 && defined(__HTTP_CONTENT_H__)\nx\n#endif\n").unwrap();
         std::fs::write(root.join("src/notes.txt"), "#include \"txt.h\"\n").unwrap();
         std::fs::write(root.join("src/.hidden/c.c"), "#include \"hidden.h\"\n").unwrap();
         let mut f = ThornFacts::scan(
-            "IMPLEMENTS: X\nUSES INCLUDE: opt.h txt.h hidden.h TP_Guts.h\n",
+            "IMPLEMENTS: X\nUSES INCLUDE: opt.h txt.h hidden.h TP_Guts.h http_Content.h\n",
             None,
         );
         f.scan_sources(&root);
@@ -815,8 +874,21 @@ PROVIDES CarpetX
         assert!(unmet_among(&tpx, [("TwoPuncturesX", &tpx)], [&tpx]).is_empty());
         assert_eq!(unmet_among(&tpx, [("TwoPuncturesX", &tpx)], [&tpx, &tp]), [Need::Include("TP_Guts.h".into())]);
         let hook = ThornFacts { implements: Some("ADMMacros".into()), needs_includes: vec!["CalcTmunu.inc".into()], ..Default::default() };
-        assert!(!counts(&Need::Include("CalcTmunu.inc".into()), [&hook, &tp]));
-        assert!(counts(&Need::Thorn("Anything".into()), []), "other needs always count");
+        assert!(!counts(&hook, &Need::Include("CalcTmunu.inc".into()), [&hook, &tp]));
+        assert!(counts(&hook, &Need::Thorn("Anything".into()), []), "other needs always count");
+        // A provider the thorn declares optional (a capability it provides, or what it
+        // implements) is one it builds without.
+        let carpet = ThornFacts::scan("IMPLEMENTS: Driver\nINCLUDE HEADER: carpet.hh in carpet.hh\n", Some("PROVIDES Carpet\n{\n}\n"));
+        let grhydro = ThornFacts {
+            optional: ThornFacts::scan("IMPLEMENTS: GRHydro", Some("OPTIONAL_IFACTIVE Carpet\n{\n}\n")).optional,
+            needs_includes: vec!["carpet.hh".into()],
+            ..Default::default()
+        };
+        assert_eq!(grhydro.optional, ["Carpet"]);
+        assert!(!counts(&grhydro, &Need::Include("carpet.hh".into()), [&carpet]));
+        let lc = ThornFacts::scan("IMPLEMENTS: LoopControl\nINCLUDE HEADER: lc.h in loopcontrol.h\n", None);
+        let slab = ThornFacts { optional: vec!["loopcontrol".into()], ..Default::default() };
+        assert!(!counts(&slab, &Need::Include("loopcontrol.h".into()), [&lc]), "by its implementation, any case");
         // Facts stored before the field existed read as needing no header.
         let old: ThornFacts = serde_json::from_str(r#"{"implements":"X","inherits":[],"friends":[],
             "requires-functions":[],"uses-functions":[],"provides-functions":[],"uses-includes":["a.h"],

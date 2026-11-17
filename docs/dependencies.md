@@ -160,9 +160,13 @@ with this crate's `needs_of` and `meets`, so they cannot disagree about what a t
   configuration, and from none it is empty, so an unconditional `#include` of a header nothing
   provides fails to compile (EinsteinInitialData/TwoPuncturesX without TwoPunctures). An include
   guard (`#ifndef X` then `#define X`) is no conditional. It counts against a set only where some
-  thorn the checker knows of provides the header (`ccl::counts`, `ccl::unmet_among`): a header
-  nothing provides compiles empty, which is how hooks work (ADMMacros' `CalcTmunu.inc`, Carpet's
-  `Requirements.hh`), or reaches the thorn through a capability's include directory. Checked
+  thorn the checker knows of provides the header, and none of those is optional to the thorn
+  (`ccl::counts`, `ccl::unmet_among`): a header nothing provides compiles empty, which is how hooks
+  work (ADMMacros' `CalcTmunu.inc`, Carpet's `Requirements.hh`), or reaches the thorn through a
+  capability's include directory; a provider that provides or implements something the thorn
+  declares `OPTIONAL`/`OPTIONAL_IFACTIVE` is one it builds without (Slab's `loopcontrol.h`,
+  GRHydro's `carpet.hh`). A header whose own guard macro the sources test (`#include
+  "http_Content.h"`, then `#ifdef __HTTP_CONTENT_H__`, Formaline) is not needed either. Checked
   against every config built in an ET 2026_05 tree, this flags nothing; against the
   et/cottonmouth-sims 2026.5.1 thornlist it flags exactly TwoPuncturesX. Facts stored before
   `provides-includes`/`needs-includes` existed read as providing and needing no header: rescan
