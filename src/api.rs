@@ -18,6 +18,7 @@
 //! | `POST /api/v1/stacks/{owner}/{name}/releases` (bearer token, [`ReleaseRequest`]) | [`Published`] |
 //! | `POST /api/v1/packages/{owner}/{name}/refresh` (bearer token) | [`Refreshed`] |
 //! | `POST /api/v1/lookup` ([`LookupRequest`]) | [`LookedUp`] |
+//! | `POST /api/v1/packages/read` ([`ReadRequest`]) | [`ReadAnswer`]: many packages each read at a commit, as the single read above reads one |
 //! | `GET /api/v1/providers?implements=…\|capability=…\|function=…\|thorn=…\|include=…` ([`ProvidersQuery`]) | [`Providers`] |
 //! | `POST /api/v1/repos` (bearer token, [`RegisterRequest`]) | [`Registered`] (every entry `existing` when there is nothing to add); 409 `conflict` when `expect` no longer matches |
 //! | `GET /api/v1/whoami` (bearer token) | [`WhoAmI`] |
@@ -87,6 +88,8 @@ pub const UNREVIEWED_HEADER: &str = "x-cactarium-unreviewed";
 pub const MAX_LOOKUP_PINS: usize = 1000;
 /// The longest URL a [`LookupRequest`] may carry, in bytes.
 pub const MAX_LOOKUP_URL_BYTES: usize = 2048;
+/// The most (package, commit) pairs one [`ReadRequest`] may ask about.
+pub const MAX_READ_ITEMS: usize = 200;
 
 /// What went wrong, with a message meant to be shown to the user as is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +99,8 @@ pub struct ErrorBody {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorDetail {
-    /// `not-found`, `unauthorized`, `forbidden`, `bad-request`, `conflict`, `rate-limited` or
+    /// `not-found`, `unauthorized`, `forbidden`, `bad-request`, `conflict`, `rate-limited`,
+    /// `upstream` (the server couldn't reach another host it needed, such as a package's repo) or
     /// `internal`.
     pub code: String,
     pub message: String,
@@ -682,6 +686,123 @@ pub struct DownloadConflict {
     pub known: DownloadReview,
 }
 
+/// `POST /packages/read`: packages read at commits, each as
+/// `GET /packages/{owner}/{name}/versions/{commit}` reads one, in one request. No token needed.
+/// The whole request counts once against the server's limit on reads made now (a 429 with
+/// `Retry-After` refuses the request, never one item). At most [`MAX_READ_ITEMS`] items, each a
+/// full commit, no pair twice.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadRequest {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub items: Vec<ReadQuery>,
+}
+
+/// One package at one commit.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadQuery {
+    /// `owner/name`.
+    pub package: String,
+    /// A full commit id: 40 or 64 lowercase hex digits.
+    pub commit: String,
+}
+
+impl ReadRequest {
+    /// The checks a server makes before reading anything: at most [`MAX_READ_ITEMS`] items, each
+    /// an `owner/name` and a full lowercase commit id, no pair asked twice.
+    pub fn validate(&self) -> Result<()> {
+        if self.items.len() > MAX_READ_ITEMS {
+            return Err(Error::invalid(format!(
+                "{} items in one read; at most {MAX_READ_ITEMS}",
+                self.items.len()
+            )));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for q in &self.items {
+            let slug: crate::slug::Slug = q.package.parse()?;
+            if slug.thorn.is_some() || slug.at.is_some() || slug.sha.is_some() {
+                return Err(Error::invalid(format!(
+                    "'{}' is not a package's owner/name (the commit goes in `commit`)",
+                    q.package
+                )));
+            }
+            if !is_commit_id(&q.commit) {
+                return Err(Error::invalid(format!(
+                    "{}: '{}' is not a full lowercase commit id (40 or 64 hex digits)",
+                    q.package, q.commit
+                )));
+            }
+            if !seen.insert(q) {
+                return Err(Error::invalid(format!("{} at {} is asked twice", q.package, q.commit)));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `POST /packages/read`'s answer: one item per asked pair, in request order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadAnswer {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub items: Vec<ReadItem>,
+}
+
+/// How one pair's read went. Each failure is what the single read answers with that
+/// [`ErrorDetail::code`]; `NotRead` is the batch's own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadStatus {
+    /// Read: `version` holds it.
+    Ok,
+    /// Not read this time: the request's budget for fetching from authors' hosts ran out, or the
+    /// read would take too long. Ask again, or read it alone.
+    NotRead,
+    /// The single read's 403: e.g. an untrusted package's code that was never reviewed.
+    Forbidden,
+    /// The single read's 404: no such package (or none this request may see), or no such commit
+    /// in its repo (is it pushed?).
+    NotFound,
+    /// The single read's 400: the package at that commit can't be read (an invalid manifest, a
+    /// thorn problem); `error` says why.
+    BadRequest,
+    /// The single read's 502: the package's host couldn't be reached, or didn't send the commit
+    /// in time. Try again later.
+    Upstream,
+    /// A status this crate doesn't know (a newer server): treat it as not read.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One pair's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadItem {
+    /// As asked.
+    pub package: String,
+    /// As asked.
+    pub commit: String,
+    pub status: ReadStatus,
+    /// With [`ReadStatus::Ok`]: exactly what the single read answers. A commit a version froze
+    /// answers as that version (with the same visibility rules: approved, or awaiting review for a
+    /// request that asked with [`INCLUDE_UNREVIEWED_HEADER`]); any other commit is read now, with
+    /// `version` set to the full commit id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<PackageVersion>,
+    /// Otherwise: the message the single read would give, meant to be shown as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// What the single read says in [`UNTRUSTED_HEADER`]: `true` when what was read now is a
+    /// package that isn't trusted.
+    #[serde(default)]
+    pub untrusted: bool,
+    /// What the single read says in [`UNREVIEWED_HEADER`]: `true` when it serves a version
+    /// awaiting review.
+    #[serde(default)]
+    pub unreviewed: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -979,5 +1100,74 @@ mod tests {
     fn error_body_shape() {
         let e: ErrorBody = serde_json::from_str(r#"{"error":{"code":"not-found","message":"Not found"}}"#).unwrap();
         assert_eq!(e.error.code, "not-found");
+    }
+
+    fn query(package: &str, commit: &str) -> ReadQuery {
+        ReadQuery { package: package.into(), commit: commit.into() }
+    }
+
+    #[test]
+    fn read_requests_are_checked() {
+        let c = "3f2c9e1a00112233445566778899aabbccddeeff";
+        let ok = ReadRequest { items: vec![query("et/carpetx", c), query("et/carpetx", &"a".repeat(40)), query("max/z4c", &"b".repeat(64))] };
+        ok.validate().unwrap();
+        let many = ReadRequest { items: (0..=MAX_READ_ITEMS).map(|i| query("et/carpetx", &format!("{i:040x}"))).collect() };
+        assert!(many.validate().unwrap_err().to_string().contains("at most 200"));
+        let full = ReadRequest { items: (0..MAX_READ_ITEMS).map(|i| query("et/carpetx", &format!("{i:040x}"))).collect() };
+        full.validate().unwrap();
+        for bad in ["3f2c9e1", "3F2C9E1A00112233445566778899AABBCCDDEEFF", "head", ""] {
+            assert!(ReadRequest { items: vec![query("et/carpetx", bad)] }.validate().is_err(), "{bad}");
+        }
+        for bad in ["carpetx", "et/carpetx/CarpetX", "et/carpetx@1.0.0", "et/carpetx#3f2c9e1", "et/", ""] {
+            assert!(ReadRequest { items: vec![query(bad, c)] }.validate().is_err(), "{bad}");
+        }
+        let twice = ReadRequest { items: vec![query("et/carpetx", c), query("et/carpetx", c)] };
+        assert!(twice.validate().unwrap_err().to_string().contains("asked twice"));
+        assert_eq!(serde_json::from_str::<ReadRequest>(r#"{"items":null}"#).unwrap(), ReadRequest::default());
+    }
+
+    #[test]
+    fn read_answers_round_trip() {
+        let c = "3f2c9e1a00112233445566778899aabbccddeeff";
+        let version = PackageVersion {
+            version: VersionInfo {
+                version: c.into(),
+                track: None,
+                tag: None,
+                commit: Some(c.into()),
+                tree: Some("ab".repeat(20)),
+                yanked: false,
+                yank_reason: None,
+                state: "ok".into(),
+                curated: false,
+                published: 0,
+                review: None,
+            },
+            url: "https://github.com/max-morris/CarpetX.git".into(),
+            flesh: false,
+            library: false,
+            thorns: vec![],
+            claims: vec![],
+        };
+        let a = ReadAnswer {
+            items: vec![
+                ReadItem { package: "max/carpetx".into(), commit: c.into(), status: ReadStatus::Ok, version: Some(version), error: None, untrusted: false, unreviewed: false },
+                ReadItem { package: "et/fakelib".into(), commit: c.into(), status: ReadStatus::Forbidden, version: None, error: Some("not served".into()), untrusted: false, unreviewed: false },
+                ReadItem { package: "et/other".into(), commit: c.into(), status: ReadStatus::NotRead, version: None, error: Some("try again".into()), untrusted: false, unreviewed: false },
+            ],
+        };
+        let j = serde_json::to_value(&a).unwrap();
+        assert_eq!(j["items"][0]["status"], "ok");
+        assert_eq!(j["items"][0]["version"]["version"], c);
+        assert!(j["items"][0].get("error").is_none());
+        assert_eq!(j["items"][1]["status"], "forbidden");
+        assert!(j["items"][1].get("version").is_none());
+        assert_eq!(j["items"][2]["status"], "not-read");
+        assert_eq!(serde_json::from_value::<ReadAnswer>(j).unwrap(), a);
+        for (word, status) in [("not-found", ReadStatus::NotFound), ("bad-request", ReadStatus::BadRequest), ("upstream", ReadStatus::Upstream), ("something-new", ReadStatus::Unknown)] {
+            let item: ReadItem = serde_json::from_str(&format!(r#"{{"package":"a/b","commit":"{c}","status":"{word}"}}"#)).unwrap();
+            assert_eq!(item.status, status, "{word}");
+            assert!(!item.untrusted && !item.unreviewed && item.version.is_none());
+        }
     }
 }
