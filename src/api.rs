@@ -422,7 +422,8 @@ pub struct PinInfo {
     pub fork_of: Vec<String>,
     /// Whether the package's repo has the commit: `true` (a version froze it, or the repo's
     /// history has it), `false` (it does not), `None` when there is no package or the history
-    /// could not be read just now.
+    /// could not be read just now (including a commit missing from a copy of the history updated
+    /// too recently to update again: it may have been pushed since).
     pub commit_known: Option<bool>,
     /// `pending` when `version` awaits an admin's review; absent when it is approved or there is
     /// no version.
@@ -688,8 +689,9 @@ pub struct DownloadConflict {
 
 /// `POST /packages/read`: packages read at commits, each as
 /// `GET /packages/{owner}/{name}/versions/{commit}` reads one, in one request. No token needed.
-/// The whole request counts once against the server's limit on reads made now (a 429 with
-/// `Retry-After` refuses the request, never one item). At most [`MAX_READ_ITEMS`] items, each a
+/// A request that reads anything now counts once against the server's limit on reads made now
+/// (a 429 with `Retry-After` refuses the request, never one item); one whose items are all
+/// versions, cached readings or errors doesn't count. At most [`MAX_READ_ITEMS`] items, each a
 /// full commit, no pair twice.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -801,9 +803,10 @@ pub struct ReadItem {
     /// awaiting review.
     #[serde(default)]
     pub unreviewed: bool,
-    /// With [`ReadStatus::NotRead`]: `true` when the server is still reading it in the
-    /// background (ask again shortly, and it will likely be ready), `false` when it never
-    /// started (no slot was free, or the request's time was up). Absent from older servers.
+    /// `true` only with [`ReadStatus::NotRead`], when the server is still reading it in the
+    /// background (ask again shortly, and it will likely be ready); `false` on every other item,
+    /// and on a `not-read` one that never started (no slot was free, or the request's time was
+    /// up). Absent from older servers.
     #[serde(default)]
     pub in_progress: bool,
 }

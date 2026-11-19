@@ -133,7 +133,8 @@ left out of a request (and its answer) that asks about none.
 - `fork-of`: the package's `[[fork-of]]` targets at this commit.
 - `commit-known`: `true` when the package's repo has the commit (a version froze it, or its
   history has it), `false` when it doesn't, `null` when there is no package or its history can't
-  be read just now.
+  be read just now (including a commit missing from a copy of the history updated too recently
+  to update again: it may have been pushed since).
 - `review`: `pending` when `version` awaits review; absent otherwise.
 - A download's `review`: `pending`, `approved` or `rejected`, or `null` when it was never
   submitted (`POST /downloads`).
@@ -147,8 +148,10 @@ No token. Each item is read as `GET /packages/{owner}/{name}/versions/{commit}` 
 client can learn a whole base's claims, `fork-of` and dependencies in one request rather than
 one read per package. At most 200 items (`MAX_READ_ITEMS`), each an `owner/name` and a full
 commit (40 or 64 lowercase hex digits), no pair twice (`ReadRequest::validate`); anything else is
-a 400 for the whole request. The request counts once against the limit on reads made now: a 429
-refuses the whole request, with `Retry-After`, never one item.
+a 400 for the whole request; an empty one answers `{"items": []}`. A request that reads anything
+now (an item that is no version, may be served and isn't cached) counts once against the limit on
+reads made now: a 429 refuses the whole request, with `Retry-After`, never one item. One that reads
+nothing now doesn't count, as a single read of a cached full commit doesn't.
 
 ```json
 { "items": [{ "package": "et/carpet", "commit": "3f2c9e1a00112233445566778899aabbccddeeff" }] }
@@ -179,9 +182,10 @@ The answer has one item per asked pair, in request order:
 - `error`: with any other status, the message the single read would give, shown as is.
 - `untrusted`, `unreviewed`: what the single read says in `x-cactarium-untrusted` and
   `x-cactarium-unreviewed`. There is no `unpinned`: every item names a commit.
-- `in-progress`: with `not-read`, `true` when the server is still reading the item in the
-  background (ask again shortly), `false` when it never started (no slot was free, or the
-  request's time was up). Absent from older servers, which read as `false`.
+- `in-progress`: on every item; `true` only on a `not-read` item the server is still reading in
+  the background (ask again shortly), `false` otherwise, including a `not-read` item that never
+  started (no slot was free, or the request's time was up). Absent from older servers, which
+  read as `false`.
 
 ## `GET /providers`: what meets a requirement
 
