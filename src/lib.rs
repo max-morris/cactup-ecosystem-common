@@ -13,7 +13,9 @@
 //! - [`par`]: which parts of a parfile are comments, and which `@NAME@` / `@KNOB(...)@` /
 //!   `@ENV(...)@` tokens it uses, lexed exactly as cactup substitutes them.
 //! - [`url`]: repo URLs compared as one repo whatever their spelling, the same way everywhere, and
-//!   whether one may be published for others to fetch ([`url::shareability`]).
+//!   whether one may be published for others to fetch ([`url::shareability`],
+//!   [`url::download_shareability`]); [`probe`]: the anonymous probe's rules, for an ssh remote's
+//!   https equivalent.
 //! - [`name`], [`version`], [`slug`]: owner/name identifiers, track-namespaced semver, and the
 //!   `owner/name[/Thorn|/sim][@...]` references users type.
 //!
@@ -29,6 +31,7 @@ pub mod error;
 pub mod manifest;
 pub mod name;
 pub mod par;
+pub mod probe;
 pub mod sim;
 pub mod slug;
 pub mod stack;
