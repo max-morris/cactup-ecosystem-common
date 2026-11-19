@@ -12,7 +12,8 @@
 //! - [`crl`]: the CRL 1.0 thornlist parser (shared with cactup); [`crl_emit`] writes components back.
 //! - [`par`]: which parts of a parfile are comments, and which `@NAME@` / `@KNOB(...)@` /
 //!   `@ENV(...)@` tokens it uses, lexed exactly as cactup substitutes them.
-//! - [`url`]: repo URLs compared as one repo whatever their spelling, the same way everywhere.
+//! - [`url`]: repo URLs compared as one repo whatever their spelling, the same way everywhere, and
+//!   whether one may be published for others to fetch ([`url::shareability`]).
 //! - [`name`], [`version`], [`slug`]: owner/name identifiers, track-namespaced semver, and the
 //!   `owner/name[/Thorn|/sim][@...]` references users type.
 //!
