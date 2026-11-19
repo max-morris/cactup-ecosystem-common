@@ -159,7 +159,7 @@ fn caseless_forge(key: &str) -> Option<&'static str> {
 ///   `[user@]host:path`. Nobody can fetch these without an account on the host, so they are
 ///   shareable only as their https equivalent ([`https_equivalent`]), and only when that answers
 ///   with no credentials at all. Then the published URL is that https URL; otherwise the URL is
-///   refused.
+///   refused ([`Shareability::refusal`], or [`moved_refusal`] when the answer was a redirect).
 /// - **[`Unsupported`](Shareability::Unsupported):** an empty URL, another scheme (`s3://`,
 ///   `ftp://`, …), a remote helper (`hg::…`, `ext::…`), a URL with no host, or one whose port
 ///   isn't a number (`https://user:pa/ss@host/x`: a password with an unencoded `/`, where the
@@ -263,6 +263,28 @@ impl Shareability {
                 "{shown} is not a URL others can fetch with git; use the repo's https URL"
             ),
         })
+    }
+}
+
+/// The refusal for an ssh URL whose https equivalent `https` answered the anonymous probe with a
+/// redirect: the repo moved (GitHub answers a renamed or transferred repo with a 301). A redirect
+/// still counts as no answer, since the probe follows none, but the fix differs: point the remote
+/// at the new URL. `to` is where the redirect pointed, when the probe saw it (its `Location`,
+/// without the smart-HTTP `/info/refs…` suffix); both URLs are [redacted](Redacted).
+pub fn moved_refusal(url: &str, https: &str, to: Option<&str>) -> String {
+    let shown = Redacted(url);
+    match to {
+        Some(to) => format!(
+            "{shown} is an ssh URL, and its https equivalent {} redirects to {}: the repo has moved; \
+             update the remote to the new URL",
+            Redacted(https),
+            Redacted(to)
+        ),
+        None => format!(
+            "{shown} is an ssh URL, and its https equivalent {} redirects elsewhere: the repo has \
+             probably moved; update the remote to its new URL",
+            Redacted(https)
+        ),
     }
 }
 
@@ -740,6 +762,16 @@ mod tests {
             let why = shareability(url).refusal(url).unwrap();
             assert!(!why.contains("s3cret"), "{why}");
         }
+    }
+
+    #[test]
+    fn moved_refusals() {
+        let why = moved_refusal("git@github.com:old/y.git", "https://github.com/old/y.git", Some("https://github.com/new/y.git"));
+        assert!(why.contains("redirects to https://github.com/new/y.git") && why.contains("update the remote"), "{why}");
+        let why = moved_refusal("git@github.com:old/y", "https://github.com/old/y", None);
+        assert!(why.contains("probably moved"), "{why}");
+        let why = moved_refusal("git@h:x", "https://h/x", Some("https://tok@h/z?k=s3cret"));
+        assert!(!why.contains("s3cret") && !why.contains("tok@"), "{why}");
     }
 
     #[test]
