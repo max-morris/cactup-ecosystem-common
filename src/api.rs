@@ -801,6 +801,11 @@ pub struct ReadItem {
     /// awaiting review.
     #[serde(default)]
     pub unreviewed: bool,
+    /// With [`ReadStatus::NotRead`]: `true` when the server is still reading it in the
+    /// background (ask again shortly, and it will likely be ready), `false` when it never
+    /// started (no slot was free, or the request's time was up). Absent from older servers.
+    #[serde(default)]
+    pub in_progress: bool,
 }
 
 #[cfg(test)]
@@ -1151,9 +1156,9 @@ mod tests {
         };
         let a = ReadAnswer {
             items: vec![
-                ReadItem { package: "max/carpetx".into(), commit: c.into(), status: ReadStatus::Ok, version: Some(version), error: None, untrusted: false, unreviewed: false },
-                ReadItem { package: "et/fakelib".into(), commit: c.into(), status: ReadStatus::Forbidden, version: None, error: Some("not served".into()), untrusted: false, unreviewed: false },
-                ReadItem { package: "et/other".into(), commit: c.into(), status: ReadStatus::NotRead, version: None, error: Some("try again".into()), untrusted: false, unreviewed: false },
+                ReadItem { package: "max/carpetx".into(), commit: c.into(), status: ReadStatus::Ok, version: Some(version), error: None, untrusted: false, unreviewed: false, in_progress: false },
+                ReadItem { package: "et/fakelib".into(), commit: c.into(), status: ReadStatus::Forbidden, version: None, error: Some("not served".into()), untrusted: false, unreviewed: false, in_progress: false },
+                ReadItem { package: "et/other".into(), commit: c.into(), status: ReadStatus::NotRead, version: None, error: Some("try again".into()), untrusted: false, unreviewed: false, in_progress: true },
             ],
         };
         let j = serde_json::to_value(&a).unwrap();
@@ -1163,11 +1168,13 @@ mod tests {
         assert_eq!(j["items"][1]["status"], "forbidden");
         assert!(j["items"][1].get("version").is_none());
         assert_eq!(j["items"][2]["status"], "not-read");
+        assert_eq!(j["items"][2]["in-progress"], true);
+        assert_eq!(j["items"][1]["in-progress"], false);
         assert_eq!(serde_json::from_value::<ReadAnswer>(j).unwrap(), a);
         for (word, status) in [("not-found", ReadStatus::NotFound), ("bad-request", ReadStatus::BadRequest), ("upstream", ReadStatus::Upstream), ("something-new", ReadStatus::Unknown)] {
             let item: ReadItem = serde_json::from_str(&format!(r#"{{"package":"a/b","commit":"{c}","status":"{word}"}}"#)).unwrap();
             assert_eq!(item.status, status, "{word}");
-            assert!(!item.untrusted && !item.unreviewed && item.version.is_none());
+            assert!(!item.untrusted && !item.unreviewed && !item.in_progress && item.version.is_none());
         }
     }
 }

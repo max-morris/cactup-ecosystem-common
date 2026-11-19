@@ -179,6 +179,9 @@ The answer has one item per asked pair, in request order:
 - `error`: with any other status, the message the single read would give, shown as is.
 - `untrusted`, `unreviewed`: what the single read says in `x-cactarium-untrusted` and
   `x-cactarium-unreviewed`. There is no `unpinned`: every item names a commit.
+- `in-progress`: with `not-read`, `true` when the server is still reading the item in the
+  background (ask again shortly), `false` when it never started (no slot was free, or the
+  request's time was up). Absent from older servers, which read as `false`.
 
 ## `GET /providers`: what meets a requirement
 
