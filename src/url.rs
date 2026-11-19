@@ -267,25 +267,54 @@ impl Shareability {
 }
 
 /// The refusal for an ssh URL whose https equivalent `https` answered the anonymous probe with a
-/// redirect: the repo moved (GitHub answers a renamed or transferred repo with a 301). A redirect
-/// still counts as no answer, since the probe follows none, but the fix differs: point the remote
-/// at the new URL. `to` is where the redirect pointed, when the probe saw it (its `Location`,
-/// without the smart-HTTP `/info/refs…` suffix); both URLs are [redacted](Redacted).
+/// redirect, which counts as no answer (the probe follows none). `to` is where the redirect
+/// pointed, when the probe saw it (its `Location`, without the smart-HTTP `/info/refs…` suffix).
+///
+/// A redirect is a move ([`redirect_is_move`]: GitHub answers a renamed or transferred repo with a
+/// 301) only when it stays on the same host, at another repo path, with no query and nothing that
+/// looks like a sign-in page. Then the message says to point the remote at the new URL. Any other
+/// redirect (to a sign-in page, which is how some forges answer a stranger asking for a private
+/// repo, to another host, or with no location seen) gets the plain refusal: the https URL doesn't
+/// answer without credentials. All URLs are [redacted](Redacted).
 pub fn moved_refusal(url: &str, https: &str, to: Option<&str>) -> String {
-    let shown = Redacted(url);
-    match to {
+    match to.filter(|to| redirect_is_move(https, to)) {
         Some(to) => format!(
-            "{shown} is an ssh URL, and its https equivalent {} redirects to {}: the repo has moved; \
+            "{} is an ssh URL, and its https equivalent {} redirects to {}: the repo has moved; \
              update the remote to the new URL",
+            Redacted(url),
             Redacted(https),
             Redacted(to)
         ),
-        None => format!(
-            "{shown} is an ssh URL, and its https equivalent {} redirects elsewhere: the repo has \
-             probably moved; update the remote to its new URL",
-            Redacted(https)
-        ),
+        None => Shareability::Ssh { https: Some(https.to_owned()) }.refusal(url).unwrap_or_default(),
     }
+}
+
+/// Path segments of a sign-in page, compared case-insensitively: a redirect to a path with one of
+/// them is a forge asking for credentials, not a moved repo. (A repo really named `auth` that
+/// moved is then refused as private: the safe side.)
+const SIGN_IN_SEGMENTS: [&str; 13] = [
+    "login", "log_in", "log-in", "signin", "sign_in", "sign-in", "session", "sessions", "auth", "oauth", "sso",
+    "saml", "cas",
+];
+
+/// Whether a redirect from `https` (an ssh URL's https equivalent) to `to` is a moved repo, as
+/// [`moved_refusal`] decides: same host (ignoring case, a `www.` and the port), another non-empty
+/// path, no query or userinfo, and no [sign-in segment](SIGN_IN_SEGMENTS) in the path.
+pub fn redirect_is_move(https: &str, to: &str) -> bool {
+    let (Some(from), Some(to_parts)) = (Parts::of(https), Parts::of(to)) else { return false };
+    let host = |p: &Parts| {
+        let h = split_port(p.host_port).0.to_ascii_lowercase();
+        h.strip_prefix("www.").map(str::to_owned).unwrap_or(h)
+    };
+    let path = |p: &Parts| p.path.trim_matches('/').to_owned();
+    let to_path = path(&to_parts);
+    host(&from) == host(&to_parts)
+        && !host(&from).is_empty()
+        && !to_parts.query
+        && to_parts.userinfo.is_none()
+        && !to_path.is_empty()
+        && to_path != path(&from)
+        && !to_path.split('/').any(|seg| SIGN_IN_SEGMENTS.iter().any(|s| seg.eq_ignore_ascii_case(s)))
 }
 
 /// A URL for messages and logs, with anything that may be a credential replaced by `***`: the
@@ -768,10 +797,37 @@ mod tests {
     fn moved_refusals() {
         let why = moved_refusal("git@github.com:old/y.git", "https://github.com/old/y.git", Some("https://github.com/new/y.git"));
         assert!(why.contains("redirects to https://github.com/new/y.git") && why.contains("update the remote"), "{why}");
-        let why = moved_refusal("git@github.com:old/y", "https://github.com/old/y", None);
-        assert!(why.contains("probably moved"), "{why}");
-        let why = moved_refusal("git@h:x", "https://h/x", Some("https://tok@h/z?k=s3cret"));
-        assert!(!why.contains("s3cret") && !why.contains("tok@"), "{why}");
+        // No location seen, a sign-in page, another host: the repo is private as far as anyone
+        // can tell, so the plain refusal.
+        for to in [
+            None,
+            Some("https://gitlab.example.org/users/sign_in"),
+            Some("https://git.example.org/login?redirect=%2Fx%2Fy"),
+            Some("https://sso.example.org/x/y"),
+            Some("https://tok@git.example.org/z?k=s3cret"),
+        ] {
+            let host = to.map_or("git.example.org", |t| if t.contains("gitlab") { "gitlab.example.org" } else { "git.example.org" });
+            let why = moved_refusal(&format!("git@{host}:x/y"), &format!("https://{host}/x/y"), to);
+            assert!(why.contains("doesn't answer without credentials") && !why.contains("moved"), "{to:?}: {why}");
+            assert!(!why.contains("s3cret") && !why.contains("tok@"), "{why}");
+        }
+    }
+
+    #[test]
+    fn which_redirects_are_moves() {
+        let from = "https://github.com/old/y.git";
+        assert!(redirect_is_move(from, "https://github.com/new/y.git"));
+        assert!(redirect_is_move(from, "https://www.GitHub.com/new/y"));
+        assert!(redirect_is_move(from, "https://github.com:443/old/z"));
+        assert!(!redirect_is_move(from, "https://github.com/old/y.git/"), "the same path");
+        assert!(!redirect_is_move(from, "https://github.com/"), "no path");
+        assert!(!redirect_is_move(from, "https://gitlab.com/new/y"), "another host");
+        assert!(!redirect_is_move(from, "https://github.com/login"));
+        assert!(!redirect_is_move(from, "https://github.com/session/new"));
+        assert!(!redirect_is_move(from, "https://github.com/x/SIGN_IN"));
+        assert!(!redirect_is_move(from, "https://github.com/new/y?return_to=1"), "a query");
+        assert!(!redirect_is_move(from, "https://u@github.com/new/y"), "userinfo");
+        assert!(!redirect_is_move(from, "/new/y"), "not absolute");
     }
 
     #[test]
