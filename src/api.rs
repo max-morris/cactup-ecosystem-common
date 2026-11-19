@@ -18,7 +18,8 @@
 //! | `POST /api/v1/stacks/{owner}/{name}/releases` (bearer token, [`ReleaseRequest`]) | [`Published`] |
 //! | `POST /api/v1/packages/{owner}/{name}/refresh` (bearer token) | [`Refreshed`] |
 //! | `POST /api/v1/lookup` ([`LookupRequest`]) | [`LookedUp`] |
-//! | `GET /api/v1/providers?implements=…\|capability=…\|function=…\|thorn=…` ([`ProvidersQuery`]) | [`Providers`] |
+//! | `POST /api/v1/packages/read` ([`ReadRequest`]) | [`ReadAnswer`]: many packages each read at a commit, as the single read above reads one |
+//! | `GET /api/v1/providers?implements=…\|capability=…\|function=…\|thorn=…\|include=…` ([`ProvidersQuery`]) | [`Providers`] |
 //! | `POST /api/v1/repos` (bearer token, [`RegisterRequest`]) | [`Registered`] (every entry `existing` when there is nothing to add); 409 `conflict` when `expect` no longer matches |
 //! | `GET /api/v1/whoami` (bearer token) | [`WhoAmI`] |
 //! | `POST /api/v1/downloads` (bearer token, [`DownloadSubmission`]) | [`DownloadReview`]; 409 [`DownloadConflict`] when it is known |
@@ -47,7 +48,7 @@ use serde::{Deserialize, Serialize};
 
 use serde::Deserializer;
 
-use crate::ccl::{Need, ThornFacts, is_ccl_name};
+use crate::ccl::{Need, ThornFacts, is_ccl_name, is_include_name};
 use crate::slug::is_commit_id;
 use crate::{Error, Result};
 
@@ -87,6 +88,8 @@ pub const UNREVIEWED_HEADER: &str = "x-cactarium-unreviewed";
 pub const MAX_LOOKUP_PINS: usize = 1000;
 /// The longest URL a [`LookupRequest`] may carry, in bytes.
 pub const MAX_LOOKUP_URL_BYTES: usize = 2048;
+/// The most (package, commit) pairs one [`ReadRequest`] may ask about.
+pub const MAX_READ_ITEMS: usize = 200;
 
 /// What went wrong, with a message meant to be shown to the user as is.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,7 +99,8 @@ pub struct ErrorBody {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorDetail {
-    /// `not-found`, `unauthorized`, `forbidden`, `bad-request`, `conflict`, `rate-limited` or
+    /// `not-found`, `unauthorized`, `forbidden`, `bad-request`, `conflict`, `rate-limited`,
+    /// `upstream` (the server couldn't reach another host it needed, such as a package's repo) or
     /// `internal`.
     pub code: String,
     pub message: String,
@@ -418,7 +422,8 @@ pub struct PinInfo {
     pub fork_of: Vec<String>,
     /// Whether the package's repo has the commit: `true` (a version froze it, or the repo's
     /// history has it), `false` (it does not), `None` when there is no package or the history
-    /// could not be read just now.
+    /// could not be read just now (including a commit missing from a copy of the history updated
+    /// too recently to update again: it may have been pushed since).
     pub commit_known: Option<bool>,
     /// `pending` when `version` awaits an admin's review; absent when it is approved or there is
     /// no version.
@@ -440,7 +445,8 @@ pub struct DownloadInfo {
 }
 
 /// `GET /providers`: the thorns of published packages that meet one CCL requirement. Exactly one
-/// of the four is given. Each maps to a [`Need`] ([`ProvidersQuery::need`], [`ProvidersQuery::of`]),
+/// of the five is given (`include` is newer than the rest: a server from before it answers that
+/// none was given). Each maps to a [`Need`] ([`ProvidersQuery::need`], [`ProvidersQuery::of`]),
 /// and the server answers with [`crate::ccl::meets`].
 ///
 /// The answer covers, for each package and track, the newest version this request may be served
@@ -462,6 +468,9 @@ pub struct ProvidersQuery {
     /// Thorns of that name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thorn: Option<String>,
+    /// Thorns that provide the header (`INCLUDE[S] ...: x IN` it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<String>,
 }
 
 impl ProvidersQuery {
@@ -473,25 +482,35 @@ impl ProvidersQuery {
             Need::Capability(_) => ProvidersQuery { capability: name, ..Default::default() },
             Need::Function(_) => ProvidersQuery { function: name, ..Default::default() },
             Need::Thorn(_) => ProvidersQuery { thorn: name, ..Default::default() },
+            Need::Include(_) => ProvidersQuery { include: name, ..Default::default() },
         }
     }
 
     /// The requirement asked about: exactly one parameter, a CCL name ([`is_ccl_name`], the rule
-    /// the scanner keeps names by, so every need [`crate::ccl::needs_of`] gives round-trips).
+    /// the scanner keeps names by, so every need [`crate::ccl::needs_of`] gives round-trips), or
+    /// for `include` an include name ([`is_include_name`]).
     pub fn need(&self) -> Result<Need> {
         let given: Vec<Need> = [
             self.implements.clone().map(Need::Implementation),
             self.capability.clone().map(Need::Capability),
             self.function.clone().map(Need::Function),
             self.thorn.clone().map(Need::Thorn),
+            self.include.clone().map(Need::Include),
         ]
         .into_iter()
         .flatten()
         .collect();
         let [need] = <[Need; 1]>::try_from(given)
-            .map_err(|_| Error::invalid("give exactly one of implements, capability, function or thorn"))?;
-        if !is_ccl_name(need.name()) {
-            return Err(Error::invalid(format!("'{}' is not a CCL name", need.name())));
+            .map_err(|_| Error::invalid("give exactly one of implements, capability, function, thorn or include"))?;
+        match &need {
+            Need::Include(h) if !is_include_name(h) => {
+                return Err(Error::invalid(format!("'{h}' is not an include name")));
+            }
+            Need::Include(_) => {}
+            _ if !is_ccl_name(need.name()) => {
+                return Err(Error::invalid(format!("'{}' is not a CCL name", need.name())));
+            }
+            _ => {}
         }
         Ok(need)
     }
@@ -505,6 +524,7 @@ impl ProvidersQuery {
             Need::Capability(_) => "capability",
             Need::Function(_) => "function",
             Need::Thorn(_) => "thorn",
+            Need::Include(_) => "include",
         };
         Ok(format!("{key}={}", need.name()))
     }
@@ -667,6 +687,130 @@ pub struct DownloadConflict {
     pub known: DownloadReview,
 }
 
+/// `POST /packages/read`: packages read at commits, each as
+/// `GET /packages/{owner}/{name}/versions/{commit}` reads one, in one request. No token needed.
+/// A request that reads anything now counts once against the server's limit on reads made now
+/// (a 429 with `Retry-After` refuses the request, never one item); one whose items are all
+/// versions, cached readings or errors doesn't count. At most [`MAX_READ_ITEMS`] items, each a
+/// full commit, no pair twice.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadRequest {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub items: Vec<ReadQuery>,
+}
+
+/// One package at one commit.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadQuery {
+    /// `owner/name`.
+    pub package: String,
+    /// A full commit id: 40 or 64 lowercase hex digits.
+    pub commit: String,
+}
+
+impl ReadRequest {
+    /// The checks a server makes before reading anything: at most [`MAX_READ_ITEMS`] items, each
+    /// an `owner/name` and a full lowercase commit id, no pair asked twice.
+    pub fn validate(&self) -> Result<()> {
+        if self.items.len() > MAX_READ_ITEMS {
+            return Err(Error::invalid(format!(
+                "{} items in one read; at most {MAX_READ_ITEMS}",
+                self.items.len()
+            )));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for q in &self.items {
+            let slug: crate::slug::Slug = q.package.parse()?;
+            if slug.thorn.is_some() || slug.at.is_some() || slug.sha.is_some() {
+                return Err(Error::invalid(format!(
+                    "'{}' is not a package's owner/name (the commit goes in `commit`)",
+                    q.package
+                )));
+            }
+            if !is_commit_id(&q.commit) {
+                return Err(Error::invalid(format!(
+                    "{}: '{}' is not a full lowercase commit id (40 or 64 hex digits)",
+                    q.package, q.commit
+                )));
+            }
+            if !seen.insert(q) {
+                return Err(Error::invalid(format!("{} at {} is asked twice", q.package, q.commit)));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `POST /packages/read`'s answer: one item per asked pair, in request order.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadAnswer {
+    #[serde(default, deserialize_with = "null_as_default")]
+    pub items: Vec<ReadItem>,
+}
+
+/// How one pair's read went. Each failure is what the single read answers with that
+/// [`ErrorDetail::code`]; `NotRead` is the batch's own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReadStatus {
+    /// Read: `version` holds it.
+    Ok,
+    /// Not read this time: the request's budget for fetching from authors' hosts ran out, or the
+    /// read would take too long. Ask again, or read it alone.
+    NotRead,
+    /// The single read's 403: e.g. an untrusted package's code that was never reviewed.
+    Forbidden,
+    /// The single read's 404: no such package (or none this request may see), or no such commit
+    /// in its repo (is it pushed?).
+    NotFound,
+    /// The single read's 400: the package at that commit can't be read (an invalid manifest, a
+    /// thorn problem); `error` says why.
+    BadRequest,
+    /// The single read's 502: the package's host couldn't be reached, or didn't send the commit
+    /// in time. Try again later.
+    Upstream,
+    /// A status this crate doesn't know (a newer server): treat it as not read.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One pair's answer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ReadItem {
+    /// As asked.
+    pub package: String,
+    /// As asked.
+    pub commit: String,
+    pub status: ReadStatus,
+    /// With [`ReadStatus::Ok`]: exactly what the single read answers. A commit a version froze
+    /// answers as that version (with the same visibility rules: approved, or awaiting review for a
+    /// request that asked with [`INCLUDE_UNREVIEWED_HEADER`]); any other commit is read now, with
+    /// `version` set to the full commit id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<PackageVersion>,
+    /// Otherwise: the message the single read would give, meant to be shown as is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// What the single read says in [`UNTRUSTED_HEADER`]: `true` when what was read now is a
+    /// package that isn't trusted.
+    #[serde(default)]
+    pub untrusted: bool,
+    /// What the single read says in [`UNREVIEWED_HEADER`]: `true` when it serves a version
+    /// awaiting review.
+    #[serde(default)]
+    pub unreviewed: bool,
+    /// `true` only with [`ReadStatus::NotRead`], when the server is still reading it in the
+    /// background (ask again shortly, and it will likely be ready); `false` on every other item,
+    /// and on a `not-read` one that never started (no slot was free, or the request's time was
+    /// up). Absent from older servers.
+    #[serde(default)]
+    pub in_progress: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -816,6 +960,13 @@ mod tests {
             assert_eq!(ProvidersQuery::of(&need).need().unwrap(), need);
         }
         assert_eq!(ProvidersQuery::of(&Need::Capability("HDF5".into())).to_query_string().unwrap(), "capability=HDF5");
+        let header = Need::Include("TP_Guts.h".into());
+        assert_eq!(ProvidersQuery::of(&header).to_query_string().unwrap(), "include=TP_Guts.h");
+        assert_eq!(ProvidersQuery::of(&header).need().unwrap(), header);
+        let climbing = ProvidersQuery { include: Some("../x.h".into()), ..Default::default() };
+        assert!(climbing.need().is_err(), "an include name never climbs");
+        let dotted = ProvidersQuery { thorn: Some("a.h".into()), ..Default::default() };
+        assert!(dotted.need().is_err(), "a thorn's name is still a CCL name");
         assert!(ProvidersQuery::default().need().is_err(), "none");
         let two = ProvidersQuery { implements: Some("A".into()), thorn: Some("B".into()), ..Default::default() };
         assert!(two.need().is_err(), "more than one");
@@ -957,5 +1108,76 @@ mod tests {
     fn error_body_shape() {
         let e: ErrorBody = serde_json::from_str(r#"{"error":{"code":"not-found","message":"Not found"}}"#).unwrap();
         assert_eq!(e.error.code, "not-found");
+    }
+
+    fn query(package: &str, commit: &str) -> ReadQuery {
+        ReadQuery { package: package.into(), commit: commit.into() }
+    }
+
+    #[test]
+    fn read_requests_are_checked() {
+        let c = "3f2c9e1a00112233445566778899aabbccddeeff";
+        let ok = ReadRequest { items: vec![query("et/carpetx", c), query("et/carpetx", &"a".repeat(40)), query("max/z4c", &"b".repeat(64))] };
+        ok.validate().unwrap();
+        let many = ReadRequest { items: (0..=MAX_READ_ITEMS).map(|i| query("et/carpetx", &format!("{i:040x}"))).collect() };
+        assert!(many.validate().unwrap_err().to_string().contains("at most 200"));
+        let full = ReadRequest { items: (0..MAX_READ_ITEMS).map(|i| query("et/carpetx", &format!("{i:040x}"))).collect() };
+        full.validate().unwrap();
+        for bad in ["3f2c9e1", "3F2C9E1A00112233445566778899AABBCCDDEEFF", "head", ""] {
+            assert!(ReadRequest { items: vec![query("et/carpetx", bad)] }.validate().is_err(), "{bad}");
+        }
+        for bad in ["carpetx", "et/carpetx/CarpetX", "et/carpetx@1.0.0", "et/carpetx#3f2c9e1", "et/", ""] {
+            assert!(ReadRequest { items: vec![query(bad, c)] }.validate().is_err(), "{bad}");
+        }
+        let twice = ReadRequest { items: vec![query("et/carpetx", c), query("et/carpetx", c)] };
+        assert!(twice.validate().unwrap_err().to_string().contains("asked twice"));
+        assert_eq!(serde_json::from_str::<ReadRequest>(r#"{"items":null}"#).unwrap(), ReadRequest::default());
+    }
+
+    #[test]
+    fn read_answers_round_trip() {
+        let c = "3f2c9e1a00112233445566778899aabbccddeeff";
+        let version = PackageVersion {
+            version: VersionInfo {
+                version: c.into(),
+                track: None,
+                tag: None,
+                commit: Some(c.into()),
+                tree: Some("ab".repeat(20)),
+                yanked: false,
+                yank_reason: None,
+                state: "ok".into(),
+                curated: false,
+                published: 0,
+                review: None,
+            },
+            url: "https://github.com/max-morris/CarpetX.git".into(),
+            flesh: false,
+            library: false,
+            thorns: vec![],
+            claims: vec![],
+        };
+        let a = ReadAnswer {
+            items: vec![
+                ReadItem { package: "max/carpetx".into(), commit: c.into(), status: ReadStatus::Ok, version: Some(version), error: None, untrusted: false, unreviewed: false, in_progress: false },
+                ReadItem { package: "et/fakelib".into(), commit: c.into(), status: ReadStatus::Forbidden, version: None, error: Some("not served".into()), untrusted: false, unreviewed: false, in_progress: false },
+                ReadItem { package: "et/other".into(), commit: c.into(), status: ReadStatus::NotRead, version: None, error: Some("try again".into()), untrusted: false, unreviewed: false, in_progress: true },
+            ],
+        };
+        let j = serde_json::to_value(&a).unwrap();
+        assert_eq!(j["items"][0]["status"], "ok");
+        assert_eq!(j["items"][0]["version"]["version"], c);
+        assert!(j["items"][0].get("error").is_none());
+        assert_eq!(j["items"][1]["status"], "forbidden");
+        assert!(j["items"][1].get("version").is_none());
+        assert_eq!(j["items"][2]["status"], "not-read");
+        assert_eq!(j["items"][2]["in-progress"], true);
+        assert_eq!(j["items"][1]["in-progress"], false);
+        assert_eq!(serde_json::from_value::<ReadAnswer>(j).unwrap(), a);
+        for (word, status) in [("not-found", ReadStatus::NotFound), ("bad-request", ReadStatus::BadRequest), ("upstream", ReadStatus::Upstream), ("something-new", ReadStatus::Unknown)] {
+            let item: ReadItem = serde_json::from_str(&format!(r#"{{"package":"a/b","commit":"{c}","status":"{word}"}}"#)).unwrap();
+            assert_eq!(item.status, status, "{word}");
+            assert!(!item.untrusted && !item.unreviewed && !item.in_progress && item.version.is_none());
+        }
     }
 }

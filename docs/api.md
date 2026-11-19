@@ -11,8 +11,13 @@ The JSON a Cactarium server and its clients (CactUp) exchange. The types live in
   client reads a newer server's answer and a newer client an older server's. A list a server may
   write as `null` reads as empty.
 - Errors are `ErrorBody`, `{"error":{"code":"…","message":"…"}}`, with a non-2xx status. `code` is
-  `not-found`, `unauthorized`, `forbidden`, `bad-request`, `conflict`, `rate-limited` or
-  `internal`; `message` is meant to be shown to the user as is.
+  `not-found`, `unauthorized`, `forbidden`, `bad-request`, `conflict`, `rate-limited`, `upstream`
+  (the server couldn't reach another host it needed, such as a package's repo) or `internal`;
+  `message` is meant to be shown to the user as is. A 429 `rate-limited` carries `Retry-After`
+  (seconds); a request refused this way didn't count against the limit.
+- A version is written `X.Y.Z` on the package's default track and `track:X.Y.Z` on any other
+  (`"version": "mixed-precision:1.0.0"`, with `"track": "mixed-precision"`), wherever a version is
+  given: version lists, `/providers`, `/lookup`, `Resolved`.
 - "Bearer" means `Authorization: Bearer <token>`.
 - Repo URLs are matched with `url::normalize_repo_url`: scheme, login, default ports, a query,
   `.git` and slashes don't count, nor does the host's case; the path's case does, and a local
@@ -35,7 +40,8 @@ The JSON a Cactarium server and its clients (CactUp) exchange. The types live in
 | `POST /stacks/{owner}/{name}/releases` (bearer, `ReleaseRequest`) | `Published` |
 | `POST /packages/{owner}/{name}/refresh` (bearer) | `Refreshed` |
 | `POST /lookup` (`LookupRequest`) | `LookedUp` |
-| `GET /providers?implements=…` (or `capability=`, `function=`, `thorn=`) | `Providers` |
+| `POST /packages/read` (`ReadRequest`) | `ReadAnswer` |
+| `GET /providers?implements=…` (or `capability=`, `function=`, `thorn=`, `include=`) | `Providers` |
 | `POST /repos` (bearer, `RegisterRequest`) | `Registered`; 409 `conflict` when `expect` no longer matches |
 | `GET /whoami` (bearer) | `WhoAmI` |
 | `POST /downloads` (bearer, `DownloadSubmission`) | `DownloadReview`; 409 `DownloadConflict` when known |
@@ -46,8 +52,20 @@ Multi-sim entries (`/sim` in `req`, `?sim=` on the download) are described in
 `GET /packages/{owner}/{name}/versions/{commit|head|master}` answers one `PackageVersion`. At a
 commit (full, or at least 7 hex digits), a commit some version froze answers with that version;
 any other is read now, with `version` set to the full commit id. At `head` or `master` it is the
-default branch's tip read now, with `version: "head"` or `"master"`. What is read now was never
-reviewed: the answer says `x-cactarium-untrusted`.
+default branch's tip read now, with `version: "head"` or `"master"`, and says
+`x-cactarium-unpinned: true`. What is read now was never reviewed: the answer says
+`x-cactarium-untrusted`, `true` for a package that isn't trusted and `false` for one that is.
+
+Its statuses, which `POST /packages/read` gives per item:
+
+| Status | Code | When |
+|---|---|---|
+| 200 | | read (or the version that froze the commit) |
+| 400 | `bad-request` | an abbreviated commit with fewer than 7 hex digits, or one matching several commits; or the package at that commit can't be read (an invalid manifest, a thorn problem), the message saying why |
+| 403 | `forbidden` | code read now (`head`, `master`, a commit no version froze) of a package that isn't trusted, on a site that doesn't serve untrusted code |
+| 404 | `not-found` | no such package (or none this request may see), or no such commit in its repo: "no commit … in … (is it pushed?)" |
+| 429 | `rate-limited` | too many reads made now from this address; `Retry-After` says when to try again. A full commit whose reading is cached doesn't count |
+| 502 | `upstream` | the package's repo host couldn't be reached, or didn't send the commit in time; try again later |
 
 `PackageVersions.contact` is where to go for help with the package (its declared contact, else
 its repo), as `Resolved.contact` gives it, so a client resolving dependencies needn't ask
@@ -59,8 +77,8 @@ its repo), as `Resolved.contact` gives it, so a client resolving dependencies ne
 |---|---|---|
 | `api-generation` | response | the API generation (`API_GENERATION_HEADER`) |
 | `x-sha256` | response | a downloaded `.sim`'s sha256 (`SHA256_HEADER`) |
-| `x-cactarium-unpinned` | response | `true` on `@head`/`@master` stacks, which aren't releases (`UNPINNED_HEADER`) |
-| `x-cactarium-untrusted` | response | on what is read now: `true` when it isn't trusted (`UNTRUSTED_HEADER`) |
+| `x-cactarium-unpinned` | response | `true` on `@head`/`@master` stacks and on a package's `versions/head` or `versions/master`, which aren't releases (`UNPINNED_HEADER`) |
+| `x-cactarium-untrusted` | response | on what is read now: `true` when it isn't trusted, `false` when it is (`UNTRUSTED_HEADER`); absent on releases |
 | `x-cactarium-contact` | response | where to go for help with a stack (`CONTACT_HEADER`) |
 | `x-cactarium-include-unreviewed` | request | `true`: serve what awaits review too, as policy allows (`INCLUDE_UNREVIEWED_HEADER`) |
 | `x-cactarium-unreviewed` | response | `true` when the answer serves something awaiting review (`UNREVIEWED_HEADER`) |
@@ -115,7 +133,8 @@ left out of a request (and its answer) that asks about none.
 - `fork-of`: the package's `[[fork-of]]` targets at this commit.
 - `commit-known`: `true` when the package's repo has the commit (a version froze it, or its
   history has it), `false` when it doesn't, `null` when there is no package or its history can't
-  be read just now.
+  be read just now (including a commit missing from a copy of the history updated too recently
+  to update again: it may have been pushed since).
 - `review`: `pending` when `version` awaits review; absent otherwise.
 - A download's `review`: `pending`, `approved` or `rejected`, or `null` when it was never
   submitted (`POST /downloads`).
@@ -123,10 +142,57 @@ left out of a request (and its answer) that asks about none.
 Pins and downloads are separate lists, rather than one list of either, so each entry has one
 unambiguous shape.
 
+## `POST /packages/read`: many packages, each at a commit
+
+No token. Each item is read as `GET /packages/{owner}/{name}/versions/{commit}` reads one, so a
+client can learn a whole base's claims, `fork-of` and dependencies in one request rather than
+one read per package. At most 200 items (`MAX_READ_ITEMS`), each an `owner/name` and a full
+commit (40 or 64 lowercase hex digits), no pair twice (`ReadRequest::validate`); anything else is
+a 400 for the whole request; an empty one answers `{"items": []}`. A request that reads anything
+now (an item that is no version, may be served and isn't cached) counts once against the limit on
+reads made now: a 429 refuses the whole request, with `Retry-After`, never one item. One that reads
+nothing now doesn't count, as a single read of a cached full commit doesn't.
+
+```json
+{ "items": [{ "package": "et/carpet", "commit": "3f2c9e1a00112233445566778899aabbccddeeff" }] }
+```
+
+The answer has one item per asked pair, in request order:
+
+```json
+{
+  "items": [{
+    "package": "et/carpet",
+    "commit": "3f2c9e1a00112233445566778899aabbccddeeff",
+    "status": "ok",
+    "version": { "version": "3f2c9e1a00112233445566778899aabbccddeeff", "commit": "…", "url": "…", "thorns": [], "claims": [] },
+    "untrusted": false,
+    "unreviewed": false
+  }]
+}
+```
+
+- `status`: `ok`, or the code the single read would fail with (`forbidden`, `not-found`,
+  `bad-request`, `upstream`; the table above), or `not-read`: the server didn't read it this time
+  (its budget for fetching from repo hosts ran out, or the read would take too long). Ask again,
+  or read that one alone. A client reads a status it doesn't know as `not-read`.
+- `version`: with `ok`, exactly the single read's `PackageVersion`: a commit a version froze
+  answers as that version (as the request may be served it), any other is read now, with
+  `version` set to the full commit id. Absent otherwise.
+- `error`: with any other status, the message the single read would give, shown as is.
+- `untrusted`, `unreviewed`: what the single read says in `x-cactarium-untrusted` and
+  `x-cactarium-unreviewed`. There is no `unpinned`: every item names a commit.
+- `in-progress`: on every item; `true` only on a `not-read` item the server is still reading in
+  the background (ask again shortly), `false` otherwise, including a `not-read` item that never
+  started (no slot was free, or the request's time was up). Absent from older servers, which
+  read as `false`.
+
 ## `GET /providers`: what meets a requirement
 
 Exactly one of `implements`, `capability`, `function` or `thorn`, a CCL name
-(`[A-Za-z0-9_]+`, so it never needs escaping). Each is one `ccl::Need` (`ProvidersQuery::of`,
+(`[A-Za-z0-9_]+`, so it never needs escaping), or `include`, an include name (`[A-Za-z0-9_.-]+`,
+not starting with `.`; newer than the rest, so a server from before it answers that none was
+given). Each is one `ccl::Need` (`ProvidersQuery::of`,
 `ProvidersQuery::need`), and the server answers with `ccl::meets`, so a client asks about exactly
 what `ccl::unmet` left unmet; every need `ccl::needs_of` gives round-trips.
 
