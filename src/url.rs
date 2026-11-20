@@ -146,8 +146,9 @@ fn caseless_forge(key: &str) -> Option<&'static str> {
 /// stores a URL and what `cactup sim export` checks before it writes one, so both refuse exactly
 /// the same URLs.
 ///
-/// - **[`Shareable`](Shareability::Shareable):** `https://`, `http://` or `git://`, with no
-///   userinfo and no query. (Whether it answers is a separate matter.)
+/// - **[`Shareable`](Shareability::Shareable):** `https://` or `http://`, with no userinfo and no
+///   query, so far as its form goes. It still has to answer the anonymous probe
+///   ([`crate::probe`]): every git remote is probed before it is published.
 /// - **[`Credentials`](Shareability::Credentials):** userinfo in any URL but an ssh one
 ///   (`https://user:TOKEN@host/…`, a token alone as `https://TOKEN@host/…`), a password in any URL
 ///   (`ssh://git:pw@host/…`, scp-like `git:pw@host:…`), or a query string, which is where forges
@@ -160,8 +161,9 @@ fn caseless_forge(key: &str) -> Option<&'static str> {
 ///   shareable only as their https equivalent ([`https_equivalent`]), and only when that answers
 ///   with no credentials at all. Then the published URL is that https URL; otherwise the URL is
 ///   refused ([`Shareability::refusal`], or [`moved_refusal`] when the answer was a redirect).
-/// - **[`Unsupported`](Shareability::Unsupported):** an empty URL, another scheme (`s3://`,
-///   `ftp://`, …), a remote helper (`hg::…`, `ext::…`), a URL with no host, or one whose port
+/// - **[`Unsupported`](Shareability::Unsupported):** an empty URL, `git://` (it can't be probed
+///   over HTTP, and has no encryption: refused rather than published unchecked), another scheme
+///   (`s3://`, `ftp://`, …), a remote helper (`hg::…`, `ext::…`), a URL with no host, or one whose port
 ///   isn't a number (`https://user:pa/ss@host/x`: a password with an unencoded `/`, where the
 ///   `/` ends the authority before the `@`).
 ///
@@ -171,7 +173,8 @@ fn caseless_forge(key: &str) -> Option<&'static str> {
 /// # The anonymous probe
 ///
 /// For [`Ssh`](Shareability::Ssh), the caller asks the https equivalent itself (this crate does
-/// no network). **The probe must carry no credentials of any kind:** no credential helpers
+/// no network), by the rules in [`crate::probe`], whose [`next_step`](crate::probe::next_step)
+/// decides what follows. **The probe must carry no credentials of any kind:** no credential helpers
 /// (`-c credential.helper=`), no `.netrc` (a `HOME` of its own), no `http.extraHeader` or cookie
 /// file, no `insteadOf` rewriting from the user's config, no prompts (`GIT_TERMINAL_PROMPT=0`, no
 /// askpass), and of course no ssh keys (it is https). Otherwise a private repo looks public to
@@ -198,6 +201,7 @@ pub enum Shareability {
 /// Whether `url` may be published for others to fetch. See [`Shareability`]. Surrounding
 /// whitespace is ignored.
 pub fn shareability(url: &str) -> Shareability {
+    let url = unquote(url);
     let Some(p) = Parts::of(url) else {
         return if is_local(url) { Shareability::Local } else { Shareability::Unsupported };
     };
@@ -216,9 +220,84 @@ pub fn shareability(url: &str) -> Shareability {
         return Shareability::Unsupported;
     }
     match p.scheme.map(str::to_ascii_lowercase).as_deref() {
-        Some("https" | "http" | "git") => Shareability::Shareable,
+        Some("https" | "http") => Shareability::Shareable,
         _ => Shareability::Unsupported,
     }
+}
+
+/// `url` without surrounding whitespace and one layer of matching quotes (`"…"` or `'…'`): a
+/// thornlist may quote its URLs, and the quotes are no part of the URL. [`shareability`],
+/// [`download_shareability`] and [`Redacted`] all look through them.
+pub fn unquote(url: &str) -> &str {
+    let t = url.trim();
+    for q in ['"', '\''] {
+        if let Some(inner) = t.strip_prefix(q).and_then(|r| r.strip_suffix(q)) {
+            return inner.trim();
+        }
+    }
+    t
+}
+
+/// Whether a URL that names a file rather than a git remote (a download: a tarball component, a
+/// sim's input, a `.sim` pin by sha256) may be published for others to fetch. The same verdicts
+/// as [`shareability`], under rules for downloads:
+///
+/// - **[`Shareable`](Shareability::Shareable):** `https://`, `http://` or `ftp://` with a host and
+///   no userinfo. A query string is fine (`?download=1`, `?raw=true`) unless one of its keys (or a
+///   fragment's) [looks like a credential](is_credential_key).
+/// - **[`Credentials`](Shareability::Credentials):** a password anywhere, userinfo in any URL but an
+///   ssh one, or a credential-like query or fragment key (`private_token`, `X-Amz-Signature`, …).
+///   A presigned URL is refused this way, and it would expire anyway.
+/// - **[`Local`](Shareability::Local):** `file://…` and paths.
+/// - **[`Unsupported`](Shareability::Unsupported):** anything over ssh (`ssh://`, `svn+ssh://`,
+///   scp-like), which needs an account on the host; other schemes; no host; a non-numeric port.
+///   Downloads have no https equivalent to swap in, so [`Ssh`](Shareability::Ssh) never comes up.
+///
+/// Refusals read best through [`Shareability::download_refusal`].
+pub fn download_shareability(url: &str) -> Shareability {
+    let url = unquote(url);
+    let Some(p) = Parts::of(url) else {
+        return if is_local(url) { Shareability::Local } else { Shareability::Unsupported };
+    };
+    let over_ssh = p.ssh || p.scheme.is_some_and(|s| s.to_ascii_lowercase().contains("ssh"));
+    if p.userinfo.is_some_and(|u| u.contains(':') || !over_ssh) || credential_in_query(&url[p.after_userinfo..]) {
+        return Shareability::Credentials;
+    }
+    if over_ssh
+        || p.host_port.is_empty()
+        || split_port(p.host_port).1.is_some_and(|port| !port.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Shareability::Unsupported;
+    }
+    match p.scheme.map(str::to_ascii_lowercase).as_deref() {
+        Some("https" | "http" | "ftp") => Shareability::Shareable,
+        _ => Shareability::Unsupported,
+    }
+}
+
+/// Whether a query or fragment key names a credential, compared case-insensitively: exactly
+/// `auth`, `key`, `sig`, `signature`, `token`, `password`, `pass`, `pwd` or `secret`; containing
+/// `token`, `secret`, `passw`, `credential`, `signature`, `apikey`, `api_key`, `api-key`,
+/// `access_key`, `accesskey` or `session`; or starting with `x-amz-`, `x-goog-` or `x-ms-`
+/// (presigned cloud-storage URLs). A denylist, so an ordinary download link's query passes.
+pub fn is_credential_key(key: &str) -> bool {
+    let k = key.trim().to_ascii_lowercase();
+    const EXACT: [&str; 9] = ["auth", "key", "sig", "signature", "token", "password", "pass", "pwd", "secret"];
+    const WITHIN: [&str; 11] = [
+        "token", "secret", "passw", "credential", "signature", "apikey", "api_key", "api-key", "access_key", "accesskey",
+        "session",
+    ];
+    const PREFIX: [&str; 3] = ["x-amz-", "x-goog-", "x-ms-"];
+    EXACT.contains(&k.as_str()) || WITHIN.iter().any(|w| k.contains(w)) || PREFIX.iter().any(|p| k.starts_with(p))
+}
+
+/// Whether the query or fragment of `tail` (a URL from its host on) has a credential-like key.
+fn credential_in_query(tail: &str) -> bool {
+    let Some(at) = tail.find(['?', '#']) else { return false };
+    tail[at + 1..]
+        .split(['&', ';', '?', '#'])
+        .map(|pair| pair.split_once('=').map_or(pair, |(k, _)| k))
+        .any(is_credential_key)
 }
 
 /// The https URL an ssh remote would be published as: same host (its ssh port dropped), same path
@@ -243,10 +322,7 @@ impl Shareability {
         let shown = Redacted(url);
         Some(match self {
             Shareability::Shareable => return None,
-            Shareability::Credentials => format!(
-                "{shown} carries credentials (a user name, password, token or query string), which \
-                 must never be published; remove them from the URL"
-            ),
+            Shareability::Credentials => credentials_refusal(url, false),
             Shareability::Local => format!(
                 "{shown} is a local path, which nobody else can fetch; push the repo to a host others \
                  can reach and use its https URL"
@@ -259,6 +335,12 @@ impl Shareability {
                 "{shown} is an ssh URL, which needs an account on the host, and has no https \
                  equivalent; use the https URL of a repo anyone can fetch"
             ),
+            Shareability::Unsupported if unquote(url).get(..6).is_some_and(|h| h.eq_ignore_ascii_case("git://")) => {
+                format!(
+                    "{shown} uses git://, which can't be checked for anonymous access and has no \
+                     encryption; use the repo's https URL"
+                )
+            }
             Shareability::Unsupported => format!(
                 "{shown} is not a URL others can fetch with git; use the repo's https URL"
             ),
@@ -266,26 +348,160 @@ impl Shareability {
     }
 }
 
-/// The refusal for an ssh URL whose https equivalent `https` answered the anonymous probe with a
-/// redirect: the repo moved (GitHub answers a renamed or transferred repo with a 301). A redirect
-/// still counts as no answer, since the probe follows none, but the fix differs: point the remote
-/// at the new URL. `to` is where the redirect pointed, when the probe saw it (its `Location`,
-/// without the smart-HTTP `/info/refs…` suffix); both URLs are [redacted](Redacted).
+impl Shareability {
+    /// [`Shareability::refusal`] for a download's URL (its [`download_shareability`]): why it
+    /// can't be published and what to do, with the URL [redacted](Redacted); `None` when it is
+    /// shareable.
+    pub fn download_refusal(&self, url: &str) -> Option<String> {
+        let shown = Redacted(url);
+        Some(match self {
+            Shareability::Shareable => return None,
+            Shareability::Credentials => credentials_refusal(url, true),
+            Shareability::Local => format!(
+                "{shown} is a local path, which nobody else can download; put the file where others can \
+                 reach it and use that URL"
+            ),
+            Shareability::Ssh { .. } | Shareability::Unsupported => format!(
+                "{shown} is not a URL others can download from (ssh needs an account on the host); use \
+                 an https URL"
+            ),
+        })
+    }
+}
+
+/// The one wording for a URL refused for its credentials, git remote or download alike, naming
+/// what was found: a user name or token (userinfo), a password, a credential-like query key (by
+/// name: `private_token`), or, for a git remote, any query string.
+fn credentials_refusal(url: &str, download: bool) -> String {
+    let u = unquote(url);
+    let mut found: Vec<String> = Vec::new();
+    if let Some(p) = Parts::of(u) {
+        match p.userinfo.map(|ui| ui.split_once(':')) {
+            Some(Some(("", _))) => found.push("a password".into()),
+            Some(Some(_)) => found.push("a user name and password".into()),
+            Some(None) if !p.ssh => found.push("a user name or token".into()),
+            _ => {}
+        }
+        let tail = &u[p.after_userinfo..];
+        if let Some(at) = tail.find(['?', '#']) {
+            let keys: Vec<&str> = tail[at + 1..]
+                .split(['&', ';', '?', '#'])
+                .map(|pair| pair.split_once('=').map_or(pair, |(k, _)| k))
+                .filter(|k| is_credential_key(k))
+                .collect();
+            match keys.first() {
+                Some(k) => found.push(format!("`{k}` in its query")),
+                None if !download && tail[at..].starts_with('?') => found.push("a query string".into()),
+                None => {}
+            }
+        }
+    }
+    let what = if found.is_empty() { "credentials".to_owned() } else { found.join(" and ") };
+    format!("{} carries {what}, which must never be published; remove it from the URL", Redacted(url))
+}
+
+/// The refusal for a remote whose probe never asked anything: its host resolves to an address that
+/// isn't public ([`crate::probe::is_public_address`]). `host` is the host as written.
+pub fn private_address_refusal(url: &str, host: &str) -> String {
+    format!(
+        "{} can't be checked: {host} is not a public address, so nobody outside your network can fetch \
+         it; publish a URL on a public host",
+        Redacted(url)
+    )
+}
+
+/// The refusal for a remote whose host couldn't be reached at all (no such host, refused, timed
+/// out, no route): nothing was asked, so nothing is known about the repo. `detail` says what
+/// happened; it is shown as given, so keep URLs out of it or redact them.
+pub fn unreachable_refusal(url: &str, detail: &str) -> String {
+    format!("{} can't be checked: its host couldn't be reached ({detail}); try again later", Redacted(url))
+}
+
+/// The refusal for a git remote `url` whose https URL `https` (`url` itself, or an ssh URL's
+/// [`https_equivalent`]) answered the anonymous probe with a redirect, which counts as no answer
+/// (the probe follows none, but one to the same repo is asked once more:
+/// [`crate::probe::next_step`]). `to` is where the redirect pointed, when the probe saw it.
+///
+/// A redirect is a move ([`redirect_is_move`]: GitHub answers a renamed or transferred repo with a
+/// 301) only when it stays on the same host, at another repo path, with no query and nothing that
+/// looks like a sign-in page. Then the message says to point the remote at the new URL. Any other
+/// redirect (to a sign-in page, which is how some forges answer a stranger asking for a private
+/// repo, to another host, or with no location seen) gets [`unanswered_refusal`]. All URLs are
+/// [redacted](Redacted).
 pub fn moved_refusal(url: &str, https: &str, to: Option<&str>) -> String {
-    let shown = Redacted(url);
-    match to {
-        Some(to) => format!(
-            "{shown} is an ssh URL, and its https equivalent {} redirects to {}: the repo has moved; \
+    match to.filter(|to| redirect_is_move(https, to) && !redirect_is_same_repo(https, to)) {
+        Some(to) if is_ssh(url) => format!(
+            "{} is an ssh URL, and its https equivalent {} redirects to {}: the repo has moved; \
              update the remote to the new URL",
+            Redacted(url),
             Redacted(https),
             Redacted(to)
         ),
-        None => format!(
-            "{shown} is an ssh URL, and its https equivalent {} redirects elsewhere: the repo has \
-             probably moved; update the remote to its new URL",
-            Redacted(https)
+        Some(to) => format!(
+            "{} redirects to {}: the repo has moved; update the remote to the new URL",
+            Redacted(url),
+            Redacted(to)
         ),
+        None => unanswered_refusal(url, https),
     }
+}
+
+/// The refusal for a git remote `url` whose https URL `https` (`url` itself, or an ssh URL's
+/// [`https_equivalent`]) didn't answer the anonymous probe: private, not a git repo, or not there.
+/// For an ssh URL it is [`Shareability::refusal`]'s; for an https one, its own wording.
+pub fn unanswered_refusal(url: &str, https: &str) -> String {
+    if is_ssh(url) {
+        return Shareability::Ssh { https: Some(https.to_owned()) }.refusal(url).unwrap_or_default();
+    }
+    format!(
+        "{} doesn't answer git without credentials (the repo is private, or isn't there); make it \
+         public, or publish a URL anyone can fetch",
+        Redacted(url)
+    )
+}
+
+/// Whether `url` is an ssh remote ([`Shareability::Ssh`], or one with credentials in it).
+fn is_ssh(url: &str) -> bool {
+    Parts::of(unquote(url)).is_some_and(|p| p.ssh)
+}
+
+/// Whether a redirect from `https` to `to` stays at the same repo: `to` is a shareable https URL
+/// with the same [`normalize_repo_url`] key, as when GitLab sends `…/g/p/info/refs` to the `.git`
+/// form `…/g/p.git/info/refs`. The probe then asks `to` once more ([`crate::probe::next_step`]),
+/// and if it answers, publishes the URL it started from (git follows such a redirect itself).
+pub fn redirect_is_same_repo(https: &str, to: &str) -> bool {
+    let to = unquote(to);
+    strip_prefix_ignore_case(to, "https://").is_some()
+        && shareability(to) == Shareability::Shareable
+        && same_repo(https, to)
+}
+
+/// Path segments of a sign-in page, compared case-insensitively: a redirect to a path with one of
+/// them is a forge asking for credentials, not a moved repo. (A repo really named `auth` that
+/// moved is then refused as private: the safe side.)
+pub const SIGN_IN_SEGMENTS: [&str; 13] = [
+    "login", "log_in", "log-in", "signin", "sign_in", "sign-in", "session", "sessions", "auth", "oauth", "sso",
+    "saml", "cas",
+];
+
+/// Whether a redirect from `https` (an ssh URL's https equivalent) to `to` is a moved repo, as
+/// [`moved_refusal`] decides: same host (ignoring case, a `www.` and the port), another non-empty
+/// path, no query or userinfo, and no [sign-in segment](SIGN_IN_SEGMENTS) in the path.
+pub fn redirect_is_move(https: &str, to: &str) -> bool {
+    let (Some(from), Some(to_parts)) = (Parts::of(https), Parts::of(to)) else { return false };
+    let host = |p: &Parts| {
+        let h = split_port(p.host_port).0.to_ascii_lowercase();
+        h.strip_prefix("www.").map(str::to_owned).unwrap_or(h)
+    };
+    let path = |p: &Parts| p.path.trim_matches('/').to_owned();
+    let to_path = path(&to_parts);
+    host(&from) == host(&to_parts)
+        && !host(&from).is_empty()
+        && !to_parts.query
+        && to_parts.userinfo.is_none()
+        && !to_path.is_empty()
+        && to_path != path(&from)
+        && !to_path.split('/').any(|seg| SIGN_IN_SEGMENTS.iter().any(|s| seg.eq_ignore_ascii_case(s)))
 }
 
 /// A URL for messages and logs, with anything that may be a credential replaced by `***`: the
@@ -297,23 +513,56 @@ pub struct Redacted<'a>(pub &'a str);
 
 impl std::fmt::Display for Redacted<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let url = self.0.trim();
-        let Some(p) = Parts::of(url) else {
-            return f.write_str(url);
-        };
-        f.write_str(p.prefix)?;
-        if let Some(userinfo) = p.userinfo {
-            match userinfo.split_once(':') {
-                Some((user, _)) if p.ssh => write!(f, "{user}:***@")?,
-                None if p.ssh => write!(f, "{userinfo}@")?,
-                _ => f.write_str("***@")?,
+        let raw = self.0.trim();
+        let url = unquote(raw);
+        // The quotes stay, around the redacted URL.
+        let quote = if url.len() < raw.len() { &raw[..1] } else { "" };
+        f.write_str(quote)?;
+        redact(f, url)?;
+        f.write_str(quote)
+    }
+}
+
+/// [`Redacted`]'s work on an unquoted URL. A URL [`Parts`] takes apart cleanly keeps an ssh user
+/// name; anything else (a local or `file://` URL, a remote helper's address, a port that isn't a
+/// number, nothing parseable) loses everything up to its last `@`, when it has a scheme or the
+/// `@` comes before any `/`. A query string always becomes `?***`.
+fn redact(f: &mut std::fmt::Formatter<'_>, url: &str) -> std::fmt::Result {
+    if is_helper(url)
+        && let Some((transport, address)) = url.split_once("::")
+    {
+        write!(f, "{transport}::")?;
+        return redact(f, address);
+    }
+    let clean = Parts::of(url)
+        .filter(|p| split_port(p.host_port).1.is_none_or(|port| port.bytes().all(|b| b.is_ascii_digit())));
+    let tail = match clean {
+        Some(p) => {
+            f.write_str(p.prefix)?;
+            if let Some(userinfo) = p.userinfo {
+                match userinfo.split_once(':') {
+                    Some((user, _)) if p.ssh => write!(f, "{user}:***@")?,
+                    None if p.ssh => write!(f, "{userinfo}@")?,
+                    _ => f.write_str("***@")?,
+                }
+            }
+            &url[p.after_userinfo..]
+        }
+        None => {
+            let start = scheme_end(url).unwrap_or(0);
+            let end = url[start..].find(['?', '#']).map_or(url.len(), |q| start + q);
+            match url[start..end].rfind('@').map(|at| start + at) {
+                Some(at) if start > 0 || !url[..at].contains('/') => {
+                    write!(f, "{}***", &url[..start])?;
+                    &url[at..]
+                }
+                _ => url,
             }
         }
-        let tail = &url[p.after_userinfo..];
-        match tail.find('?') {
-            Some(q) => write!(f, "{}?***", &tail[..q]),
-            None => f.write_str(tail),
-        }
+    };
+    match tail.find('?') {
+        Some(q) => write!(f, "{}?***", &tail[..q]),
+        None => f.write_str(tail),
     }
 }
 
@@ -666,7 +915,7 @@ mod tests {
             ("https://github.com/x/y.git", Shareable),
             ("  HTTPS://GitHub.com/x/y/  ", Shareable),
             ("http://host.org:8080/x", Shareable),
-            ("git://host.org/x.git", Shareable),
+            ("git://host.org/x.git", Unsupported),
             ("https://github.com/x/repo@v1", Shareable),
             ("https://[2001:db8::1]/x", Shareable),
             ("https://github.com/x/y#readme", Shareable),
@@ -768,20 +1017,149 @@ mod tests {
     fn moved_refusals() {
         let why = moved_refusal("git@github.com:old/y.git", "https://github.com/old/y.git", Some("https://github.com/new/y.git"));
         assert!(why.contains("redirects to https://github.com/new/y.git") && why.contains("update the remote"), "{why}");
-        let why = moved_refusal("git@github.com:old/y", "https://github.com/old/y", None);
-        assert!(why.contains("probably moved"), "{why}");
-        let why = moved_refusal("git@h:x", "https://h/x", Some("https://tok@h/z?k=s3cret"));
-        assert!(!why.contains("s3cret") && !why.contains("tok@"), "{why}");
+        // No location seen, a sign-in page, another host: the repo is private as far as anyone
+        // can tell, so the plain refusal.
+        for to in [
+            None,
+            Some("https://gitlab.example.org/users/sign_in"),
+            Some("https://git.example.org/login?redirect=%2Fx%2Fy"),
+            Some("https://sso.example.org/x/y"),
+            Some("https://tok@git.example.org/z?k=s3cret"),
+        ] {
+            let host = to.map_or("git.example.org", |t| if t.contains("gitlab") { "gitlab.example.org" } else { "git.example.org" });
+            let why = moved_refusal(&format!("git@{host}:x/y"), &format!("https://{host}/x/y"), to);
+            assert!(why.contains("doesn't answer without credentials") && !why.contains("moved"), "{to:?}: {why}");
+            assert!(!why.contains("s3cret") && !why.contains("tok@"), "{why}");
+        }
+    }
+
+    #[test]
+    fn which_redirects_are_moves() {
+        let from = "https://github.com/old/y.git";
+        assert!(redirect_is_move(from, "https://github.com/new/y.git"));
+        assert!(redirect_is_move(from, "https://www.GitHub.com/new/y"));
+        assert!(redirect_is_move(from, "https://github.com:443/old/z"));
+        assert!(!redirect_is_move(from, "https://github.com/old/y.git/"), "the same path");
+        assert!(!redirect_is_move(from, "https://github.com/"), "no path");
+        assert!(!redirect_is_move(from, "https://gitlab.com/new/y"), "another host");
+        assert!(!redirect_is_move(from, "https://github.com/login"));
+        assert!(!redirect_is_move(from, "https://github.com/session/new"));
+        assert!(!redirect_is_move(from, "https://github.com/x/SIGN_IN"));
+        assert!(!redirect_is_move(from, "https://github.com/new/y?return_to=1"), "a query");
+        assert!(!redirect_is_move(from, "https://u@github.com/new/y"), "userinfo");
+        assert!(!redirect_is_move(from, "/new/y"), "not absolute");
     }
 
     #[test]
     fn refusals_name_the_fix() {
         let r = |u: &str| shareability(u).refusal(u);
         assert_eq!(r("https://github.com/x/y"), None);
-        assert!(r("https://t@github.com/x/y").unwrap().contains("remove them from the URL"));
+        assert!(r("https://t@github.com/x/y").unwrap().contains("remove it from the URL"));
         assert!(r("/srv/x").unwrap().contains("local path"));
         let why = r("git@github.com:x/y").unwrap();
         assert!(why.contains("https://github.com/x/y") && why.contains("without credentials"), "{why}");
         assert!(r("s3://b/x").unwrap().contains("https URL"));
+    }
+
+    #[test]
+    fn quoted_urls() {
+        assert_eq!(unquote(r#"  "https://github.com/x/y"  "#), "https://github.com/x/y");
+        assert_eq!(unquote("'git@github.com:x/y'"), "git@github.com:x/y");
+        assert_eq!(unquote(r#""https://x"#), r#""https://x"#, "unbalanced");
+        assert_eq!(shareability(r#""https://github.com/x/y.git""#), Shareability::Shareable);
+        assert_eq!(shareability(r#""https://TOKEN@github.com/o/x.git""#), Shareability::Credentials);
+        assert_eq!(download_shareability("'https://zenodo.org/x.h5?download=1'"), Shareability::Shareable);
+    }
+
+    #[test]
+    fn downloads() {
+        use Shareability::*;
+        for (url, want) in [
+            ("https://zenodo.org/records/1/files/x.h5?download=1", Shareable),
+            ("https://github.com/o/r/raw/main/x.tgz?raw=true", Shareable),
+            ("http://host.org/x.tgz", Shareable),
+            ("ftp://ftp.host.org/pub/x.tgz", Shareable),
+            ("https://host.org/x.tgz#sha256", Shareable),
+            ("https://gitlab.com/api/v4/projects/1/repository/archive?private_token=glpat-s3cret", Credentials),
+            ("https://b.s3.amazonaws.com/x?X-Amz-Algorithm=AWS4&X-Amz-Credential=a&X-Amz-Signature=s3cret", Credentials),
+            ("https://storage.googleapis.com/b/x?X-Goog-Signature=s3cret", Credentials),
+            ("https://acct.blob.core.windows.net/c/x?sv=1&sig=s3cret", Credentials),
+            ("https://host/x?Expires=1&Signature=s3cret", Credentials),
+            ("https://host/x?access_token=s3cret", Credentials),
+            ("https://host/x?apikey=s3cret", Credentials),
+            ("https://host/x?key=s3cret", Credentials),
+            ("https://host/x#access_token=s3cret", Credentials),
+            ("https://u:s3cret@host/x", Credentials),
+            ("https://s3cret@host/x", Credentials),
+            ("svn+ssh://u:s3cret@host/x", Credentials),
+            ("ftp://anon:pw@host/x", Credentials),
+            ("svn+ssh://svn.host.org/repo", Unsupported),
+            ("ssh://git@host/x.tgz", Unsupported),
+            ("git@host:x.tgz", Unsupported),
+            ("s3://bucket/x", Unsupported),
+            ("https:///x", Unsupported),
+            ("https://u:pa/ss@host/x", Unsupported),
+            ("/data/x.h5", Local),
+            ("file:///data/x.h5", Local),
+        ] {
+            assert_eq!(download_shareability(url), want, "{url}");
+        }
+        assert!(!is_credential_key("download") && !is_credential_key("raw") && !is_credential_key("ref") && !is_credential_key("dl"));
+        let why = download_shareability("https://host/x?private_token=s3cret").download_refusal("https://host/x?private_token=s3cret").unwrap();
+        assert!(why.contains("`private_token` in its query") && !why.contains("s3cret"), "{why}");
+        assert!(Shareability::Unsupported.download_refusal("svn+ssh://h/x").unwrap().contains("ssh needs an account"));
+    }
+
+    /// What a review found shown in clear, and what `Redacted` shows now.
+    #[test]
+    fn redaction_of_what_does_not_parse() {
+        for (url, shown) in [
+            ("file://user:s3cret@server/x.git", "file://***@server/x.git"),
+            ("https://user:s3c/ret@github.com/o/x", "https://***@github.com/o/x"),
+            ("hg::https://u:s3cret@h/x", "hg::https://***@h/x"),
+            (r#""https://s3cret@github.com/o/x.git""#, r#""https://***@github.com/o/x.git""#),
+            ("'git:s3cret@host:x'", "'git:***@host:x'"),
+            ("foo://u:s3cret@h/x?k=s3cret", "foo://***@h/x?***"),
+            ("/home/u/repo@v1", "/home/u/repo@v1"),
+            ("https://github.com/o/repo@v1", "https://github.com/o/repo@v1"),
+            ("git@github.com:o/x", "git@github.com:o/x"),
+        ] {
+            let got = Redacted(url).to_string();
+            assert_eq!(got, shown, "{url}");
+            assert!(!got.contains("s3c"), "{url}: {got}");
+        }
+    }
+
+    #[test]
+    fn same_repo_redirects() {
+        assert!(redirect_is_same_repo("https://gitlab.com/g/p", "https://gitlab.com/g/p.git"));
+        assert!(redirect_is_same_repo("https://gitlab.com/g/p.git", "https://GitLab.com/g/p/"));
+        assert!(!redirect_is_same_repo("https://gitlab.com/g/p", "http://gitlab.com/g/p.git"), "not https");
+        assert!(!redirect_is_same_repo("https://gitlab.com/g/p", "https://gitlab.com/g/q.git"));
+        assert!(!redirect_is_same_repo("https://gitlab.com/g/p", "https://t@gitlab.com/g/p.git"));
+        assert!(!redirect_is_same_repo("https://gitlab.com/g/p", "https://gitlab.com/users/sign_in"));
+        // A same-repo redirect isn't a move (when asking once more didn't answer either).
+        let why = moved_refusal("git@gitlab.com:g/p", "https://gitlab.com/g/p", Some("https://gitlab.com/g/p.git"));
+        assert!(!why.contains("moved") && why.contains("without credentials"), "{why}");
+    }
+
+    #[test]
+    fn credentials_named() {
+        let r = |u: &str| shareability(u).refusal(u).unwrap();
+        let d = |u: &str| download_shareability(u).download_refusal(u).unwrap();
+        assert!(r("https://alice:s3cret@host/x").contains("carries a user name and password,"));
+        assert!(r("https://s3cret@host/x").contains("carries a user name or token,"));
+        assert!(r("https://:s3cret@host/x").contains("carries a password,"));
+        assert!(r("git:s3cret@host:x").contains("carries a user name and password,"));
+        assert!(r("https://host/x?private_token=s3cret").contains("carries `private_token` in its query,"));
+        assert!(r("https://host/x?ref=main").contains("carries a query string,"));
+        assert!(d("https://host/x?download=1&X-Amz-Signature=s3cret").contains("carries `X-Amz-Signature` in its query,"));
+        assert!(d("https://alice:s3cret@host/x").contains("carries a user name and password,"));
+        assert!(d("https://alice@host/x?token=s3cret").contains("carries a user name or token and `token` in its query,"));
+        for m in [r("https://alice:s3cret@host/x?k=s3cret"), d("https://host/x?sig=s3cret")] {
+            assert!(!m.contains("s3cret") && m.ends_with("remove it from the URL"), "{m}");
+        }
+        assert!(private_address_refusal("https://10.0.0.5/x", "10.0.0.5").contains("10.0.0.5 is not a public address"));
+        assert!(unreachable_refusal("https://t@h/x", "connection refused").starts_with("https://***@h/x can't be checked"));
     }
 }
