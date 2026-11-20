@@ -437,7 +437,7 @@ pub fn redirect_is_same_repo(https: &str, to: &str) -> bool {
 /// Path segments of a sign-in page, compared case-insensitively: a redirect to a path with one of
 /// them is a forge asking for credentials, not a moved repo. (A repo really named `auth` that
 /// moved is then refused as private: the safe side.)
-const SIGN_IN_SEGMENTS: [&str; 13] = [
+pub const SIGN_IN_SEGMENTS: [&str; 13] = [
     "login", "log_in", "log-in", "signin", "sign_in", "sign-in", "session", "sessions", "auth", "oauth", "sso",
     "saml", "cas",
 ];
