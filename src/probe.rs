@@ -1,10 +1,13 @@
-//! The anonymous probe, decided here so the Cactarium and cactup decide the same way: whether an
-//! ssh remote's https equivalent ([`crate::url::https_equivalent`]) answers a stranger, so the
-//! https URL can be published in its place. This module is pure; each side does only the I/O.
+//! The anonymous probe, decided here so the Cactarium and cactup decide the same way. Every git
+//! remote is probed before it is published: an https or http URL must answer a stranger itself,
+//! and an ssh URL is published as its https equivalent ([`crate::url::https_equivalent`]) only if
+//! that answers. (`git://` is refused by [`crate::url::shareability`]: no HTTP to probe.) This
+//! module is pure; each side does only the I/O.
 //!
 //! # Running it
 //!
-//! 1. Ask `GET` [`probe_url`]`(https)` with no credentials of any kind: no credential helper, no
+//! 0. [`start`]`(url)` refuses a URL by its form, or names the `candidate` to probe and publish.
+//! 1. Ask `GET` [`probe_url`]`(asked)` (first `asked` = `candidate`) with no credentials of any kind: no credential helper, no
 //!    `.netrc`, no cookies, no extra headers, no `insteadOf` rewriting, no prompts, no keys. Send a
 //!    `User-Agent` starting with [`USER_AGENT_PREFIX`] (`git/`), since forges answer git clients
 //!    and browsers differently. Follow no redirect. Connect only to an address
@@ -13,10 +16,12 @@
 //!    [`Outcome::Answer`]; a 3xx gives [`Outcome::Redirect`] with
 //!    [`redirect_target`]`(request, Location)`; anything else (an error, a 401 or 403, no
 //!    connection) is [`Outcome::Other`].
-//! 3. [`next_step`] says what to do: publish an https URL, ask once more at the target of a
+//! 3. [`next_step`] says what to do: publish the candidate, ask once more at the target of a
 //!    redirect to the same repo (GitLab's `.git` form), or refuse with a message to show.
+//!
+//! Every probe connects only to addresses [`is_public_address`] accepts, http as well as https.
 
-use crate::url::{Shareability, moved_refusal, redirect_is_same_repo, unquote};
+use crate::url::{Shareability, moved_refusal, redirect_is_same_repo, shareability, unanswered_refusal, unquote};
 use std::net::IpAddr;
 
 /// What the probe asks for after the repo URL: git's smart-HTTP ref advertisement, the first thing
@@ -124,31 +129,54 @@ pub enum Outcome {
     Other,
 }
 
+/// How checking a git remote begins ([`start`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Start {
+    /// Probe this URL (the remote itself when https or http, an ssh remote's https equivalent);
+    /// it is what gets published if it answers.
+    Probe { candidate: String },
+    /// Refused by its form ([`shareability`]): credentials, a local path, git://, an ssh URL with
+    /// no https equivalent, anything else. The message (URL redacted) to show.
+    Refuse(String),
+}
+
+/// How checking the git remote `url` begins, by its form ([`shareability`]).
+pub fn start(url: &str) -> Start {
+    match shareability(url) {
+        Shareability::Shareable => Start::Probe { candidate: unquote(url).to_owned() },
+        Shareability::Ssh { https: Some(https) } => Start::Probe { candidate: https },
+        s => Start::Refuse(s.refusal(url).unwrap_or_default()),
+    }
+}
+
 /// What to do next ([`next_step`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Publish this https URL in place of the ssh one.
+    /// Publish this URL (the candidate) for the remote.
     Publish(String),
-    /// Probe this URL (a redirect's target at the same repo), once, then call [`next_step`] again
-    /// with `first: false`.
+    /// Probe this URL (a redirect's target at the same repo) once more, then call [`next_step`]
+    /// again with it as `asked`.
     Probe(String),
     /// Refuse, showing this message (URLs redacted). A caller may append its own detail.
     Refuse(String),
 }
 
-/// The decision after probing `asked` for the ssh remote `url`. `first` is true for the probe of
-/// `url`'s https equivalent, false for the one more probe a [`Step::Probe`] asks for. An answer
-/// publishes `asked`; on the first probe, a redirect to the same repo
-/// ([`redirect_is_same_repo`]) is asked once more; any other redirect is refused by
-/// [`moved_refusal`] (a move, or a sign-in page); anything else by the plain ssh refusal.
-pub fn next_step(url: &str, asked: &str, outcome: &Outcome, first: bool) -> Step {
+/// The decision after probing `asked` for the git remote `url`, whose [`start`] named `candidate`.
+/// The first probe asks the candidate itself; a [`Step::Probe`] asks once more elsewhere.
+///
+/// - An answer publishes the candidate, also when it came from asking once more: the target of a
+///   same-repo redirect has the candidate's repo key, and git follows that redirect itself.
+/// - On the first probe, a redirect to the same repo ([`redirect_is_same_repo`]) is asked once more.
+/// - Any other redirect is refused by [`moved_refusal`] (a real move says so; a sign-in page or
+///   another host is [`unanswered_refusal`]).
+/// - Anything else is [`unanswered_refusal`].
+pub fn next_step(url: &str, candidate: &str, asked: &str, outcome: &Outcome) -> Step {
+    let first = asked == candidate;
     match outcome {
-        Outcome::Answer => Step::Publish(asked.to_owned()),
-        Outcome::Redirect(Some(to)) if first && redirect_is_same_repo(asked, to) => Step::Probe(to.clone()),
-        Outcome::Redirect(to) => Step::Refuse(moved_refusal(url, asked, to.as_deref())),
-        Outcome::Other => {
-            Step::Refuse(Shareability::Ssh { https: Some(asked.to_owned()) }.refusal(url).unwrap_or_default())
-        }
+        Outcome::Answer => Step::Publish(candidate.to_owned()),
+        Outcome::Redirect(Some(to)) if first && redirect_is_same_repo(candidate, to) => Step::Probe(to.clone()),
+        Outcome::Redirect(to) => Step::Refuse(moved_refusal(url, candidate, to.as_deref())),
+        Outcome::Other => Step::Refuse(unanswered_refusal(url, candidate)),
     }
 }
 
@@ -191,25 +219,59 @@ mod tests {
     }
 
     #[test]
+    fn starts() {
+        assert_eq!(start("https://github.com/x/y"), Start::Probe { candidate: "https://github.com/x/y".into() });
+        assert_eq!(start(r#""https://github.com/x/y""#), Start::Probe { candidate: "https://github.com/x/y".into() });
+        assert_eq!(start("git@github.com:x/y.git"), Start::Probe { candidate: "https://github.com/x/y.git".into() });
+        for (url, says) in [
+            ("https://t@github.com/x/y", "remove them"),
+            ("git://github.com/x/y", "git://"),
+            ("/srv/x", "local path"),
+            ("user@host:~u/x", "no https"),
+        ] {
+            assert!(matches!(start(url), Start::Refuse(m) if m.contains(says)), "{url}");
+        }
+    }
+
+    #[test]
     fn steps() {
+        // An ssh remote, probed as its https equivalent.
         let ssh = "git@gitlab.com:g/p";
         let https = "https://gitlab.com/g/p";
-        assert_eq!(next_step(ssh, https, &Outcome::Answer, true), Step::Publish(https.into()));
-        // GitLab's `.git` redirect: asked once more, and published when it answers.
+        assert_eq!(next_step(ssh, https, https, &Outcome::Answer), Step::Publish(https.into()));
+        // GitLab's `.git` redirect: asked once more; the candidate is published when it answers.
         let dotgit = "https://gitlab.com/g/p.git";
-        assert_eq!(next_step(ssh, https, &Outcome::Redirect(Some(dotgit.into())), true), Step::Probe(dotgit.into()));
-        assert_eq!(next_step(ssh, dotgit, &Outcome::Answer, false), Step::Publish(dotgit.into()));
+        assert_eq!(next_step(ssh, https, https, &Outcome::Redirect(Some(dotgit.into()))), Step::Probe(dotgit.into()));
+        assert_eq!(next_step(ssh, https, dotgit, &Outcome::Answer), Step::Publish(https.into()));
         // Asked once more and redirected again: refused, not a move.
-        match next_step(ssh, dotgit, &Outcome::Redirect(Some(https.into())), false) {
+        match next_step(ssh, https, dotgit, &Outcome::Redirect(Some(https.into()))) {
             Step::Refuse(m) => assert!(m.contains("doesn't answer without credentials") && !m.contains("moved"), "{m}"),
             other => panic!("{other:?}"),
         }
-        // A move, a sign-in page, nothing.
         let gh = "git@github.com:old/y";
-        let moved = next_step(gh, "https://github.com/old/y", &Outcome::Redirect(Some("https://github.com/new/y".into())), true);
-        assert!(matches!(&moved, Step::Refuse(m) if m.contains("has moved")), "{moved:?}");
-        let login = next_step(ssh, https, &Outcome::Redirect(Some("https://gitlab.com/users/sign_in".into())), true);
+        let moved = next_step(gh, "https://github.com/old/y", "https://github.com/old/y", &Outcome::Redirect(Some("https://github.com/new/y".into())));
+        assert!(matches!(&moved, Step::Refuse(m) if m.contains("is an ssh URL") && m.contains("has moved")), "{moved:?}");
+        let login = next_step(ssh, https, https, &Outcome::Redirect(Some("https://gitlab.com/users/sign_in".into())));
         assert!(matches!(&login, Step::Refuse(m) if !m.contains("moved")), "{login:?}");
-        assert!(matches!(next_step(ssh, https, &Outcome::Other, true), Step::Refuse(m) if m.contains("without credentials")));
+        assert!(matches!(next_step(ssh, https, https, &Outcome::Other), Step::Refuse(m) if m.contains("without credentials")));
+    }
+
+    #[test]
+    fn https_remotes_are_probed_too() {
+        let url = "https://github.com/me/private.git";
+        assert_eq!(next_step(url, url, url, &Outcome::Answer), Step::Publish(url.into()));
+        match next_step(url, url, url, &Outcome::Other) {
+            Step::Refuse(m) => assert!(m.contains("doesn't answer git without credentials") && !m.contains("ssh"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let moved = next_step(url, url, url, &Outcome::Redirect(Some("https://github.com/them/private.git".into())));
+        assert!(matches!(&moved, Step::Refuse(m) if m.contains("redirects to https://github.com/them/private.git") && !m.contains("ssh")), "{moved:?}");
+        // GitLab's `.git` form, then an answer: the URL as written is published.
+        let gl = "https://gitlab.com/g/p";
+        assert_eq!(next_step(gl, gl, gl, &Outcome::Redirect(Some("https://gitlab.com/g/p.git".into()))), Step::Probe("https://gitlab.com/g/p.git".into()));
+        assert_eq!(next_step(gl, gl, "https://gitlab.com/g/p.git", &Outcome::Answer), Step::Publish(gl.into()));
+        // http:// redirecting to its https form is the same repo, asked once more.
+        let http = "http://github.com/x/y";
+        assert_eq!(next_step(http, http, http, &Outcome::Redirect(Some("https://github.com/x/y".into()))), Step::Probe("https://github.com/x/y".into()));
     }
 }

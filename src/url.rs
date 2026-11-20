@@ -146,8 +146,9 @@ fn caseless_forge(key: &str) -> Option<&'static str> {
 /// stores a URL and what `cactup sim export` checks before it writes one, so both refuse exactly
 /// the same URLs.
 ///
-/// - **[`Shareable`](Shareability::Shareable):** `https://`, `http://` or `git://`, with no
-///   userinfo and no query. (Whether it answers is a separate matter.)
+/// - **[`Shareable`](Shareability::Shareable):** `https://` or `http://`, with no userinfo and no
+///   query, so far as its form goes. It still has to answer the anonymous probe
+///   ([`crate::probe`]): every git remote is probed before it is published.
 /// - **[`Credentials`](Shareability::Credentials):** userinfo in any URL but an ssh one
 ///   (`https://user:TOKEN@host/…`, a token alone as `https://TOKEN@host/…`), a password in any URL
 ///   (`ssh://git:pw@host/…`, scp-like `git:pw@host:…`), or a query string, which is where forges
@@ -160,8 +161,9 @@ fn caseless_forge(key: &str) -> Option<&'static str> {
 ///   shareable only as their https equivalent ([`https_equivalent`]), and only when that answers
 ///   with no credentials at all. Then the published URL is that https URL; otherwise the URL is
 ///   refused ([`Shareability::refusal`], or [`moved_refusal`] when the answer was a redirect).
-/// - **[`Unsupported`](Shareability::Unsupported):** an empty URL, another scheme (`s3://`,
-///   `ftp://`, …), a remote helper (`hg::…`, `ext::…`), a URL with no host, or one whose port
+/// - **[`Unsupported`](Shareability::Unsupported):** an empty URL, `git://` (it can't be probed
+///   over HTTP, and has no encryption: refused rather than published unchecked), another scheme
+///   (`s3://`, `ftp://`, …), a remote helper (`hg::…`, `ext::…`), a URL with no host, or one whose port
 ///   isn't a number (`https://user:pa/ss@host/x`: a password with an unencoded `/`, where the
 ///   `/` ends the authority before the `@`).
 ///
@@ -218,7 +220,7 @@ pub fn shareability(url: &str) -> Shareability {
         return Shareability::Unsupported;
     }
     match p.scheme.map(str::to_ascii_lowercase).as_deref() {
-        Some("https" | "http" | "git") => Shareability::Shareable,
+        Some("https" | "http") => Shareability::Shareable,
         _ => Shareability::Unsupported,
     }
 }
@@ -336,6 +338,12 @@ impl Shareability {
                 "{shown} is an ssh URL, which needs an account on the host, and has no https \
                  equivalent; use the https URL of a repo anyone can fetch"
             ),
+            Shareability::Unsupported if unquote(url).get(..6).is_some_and(|h| h.eq_ignore_ascii_case("git://")) => {
+                format!(
+                    "{shown} uses git://, which can't be checked for anonymous access and has no \
+                     encryption; use the repo's https URL"
+                )
+            }
             Shareability::Unsupported => format!(
                 "{shown} is not a URL others can fetch with git; use the repo's https URL"
             ),
@@ -367,33 +375,58 @@ impl Shareability {
     }
 }
 
-/// The refusal for an ssh URL whose https equivalent `https` answered the anonymous probe with a
-/// redirect, which counts as no answer (the probe follows none). `to` is where the redirect
-/// pointed, when the probe saw it (its `Location`, without the smart-HTTP `/info/refs…` suffix).
+/// The refusal for a git remote `url` whose https URL `https` (`url` itself, or an ssh URL's
+/// [`https_equivalent`]) answered the anonymous probe with a redirect, which counts as no answer
+/// (the probe follows none, but one to the same repo is asked once more:
+/// [`crate::probe::next_step`]). `to` is where the redirect pointed, when the probe saw it.
 ///
 /// A redirect is a move ([`redirect_is_move`]: GitHub answers a renamed or transferred repo with a
 /// 301) only when it stays on the same host, at another repo path, with no query and nothing that
 /// looks like a sign-in page. Then the message says to point the remote at the new URL. Any other
 /// redirect (to a sign-in page, which is how some forges answer a stranger asking for a private
-/// repo, to another host, or with no location seen) gets the plain refusal: the https URL doesn't
-/// answer without credentials. All URLs are [redacted](Redacted).
+/// repo, to another host, or with no location seen) gets [`unanswered_refusal`]. All URLs are
+/// [redacted](Redacted).
 pub fn moved_refusal(url: &str, https: &str, to: Option<&str>) -> String {
     match to.filter(|to| redirect_is_move(https, to) && !redirect_is_same_repo(https, to)) {
-        Some(to) => format!(
+        Some(to) if is_ssh(url) => format!(
             "{} is an ssh URL, and its https equivalent {} redirects to {}: the repo has moved; \
              update the remote to the new URL",
             Redacted(url),
             Redacted(https),
             Redacted(to)
         ),
-        None => Shareability::Ssh { https: Some(https.to_owned()) }.refusal(url).unwrap_or_default(),
+        Some(to) => format!(
+            "{} redirects to {}: the repo has moved; update the remote to the new URL",
+            Redacted(url),
+            Redacted(to)
+        ),
+        None => unanswered_refusal(url, https),
     }
+}
+
+/// The refusal for a git remote `url` whose https URL `https` (`url` itself, or an ssh URL's
+/// [`https_equivalent`]) didn't answer the anonymous probe: private, not a git repo, or not there.
+/// For an ssh URL it is [`Shareability::refusal`]'s; for an https one, its own wording.
+pub fn unanswered_refusal(url: &str, https: &str) -> String {
+    if is_ssh(url) {
+        return Shareability::Ssh { https: Some(https.to_owned()) }.refusal(url).unwrap_or_default();
+    }
+    format!(
+        "{} doesn't answer git without credentials (the repo is private, or isn't there); make it \
+         public, or publish a URL anyone can fetch",
+        Redacted(url)
+    )
+}
+
+/// Whether `url` is an ssh remote ([`Shareability::Ssh`], or one with credentials in it).
+fn is_ssh(url: &str) -> bool {
+    Parts::of(unquote(url)).is_some_and(|p| p.ssh)
 }
 
 /// Whether a redirect from `https` to `to` stays at the same repo: `to` is a shareable https URL
 /// with the same [`normalize_repo_url`] key, as when GitLab sends `…/g/p/info/refs` to the `.git`
-/// form `…/g/p.git/info/refs`. The probe then asks `to` once more ([`crate::probe::next_step`]) and
-/// publishes `to` if it answers.
+/// form `…/g/p.git/info/refs`. The probe then asks `to` once more ([`crate::probe::next_step`]),
+/// and if it answers, publishes the URL it started from (git follows such a redirect itself).
 pub fn redirect_is_same_repo(https: &str, to: &str) -> bool {
     let to = unquote(to);
     strip_prefix_ignore_case(to, "https://").is_some()
@@ -840,7 +873,7 @@ mod tests {
             ("https://github.com/x/y.git", Shareable),
             ("  HTTPS://GitHub.com/x/y/  ", Shareable),
             ("http://host.org:8080/x", Shareable),
-            ("git://host.org/x.git", Shareable),
+            ("git://host.org/x.git", Unsupported),
             ("https://github.com/x/repo@v1", Shareable),
             ("https://[2001:db8::1]/x", Shareable),
             ("https://github.com/x/y#readme", Shareable),
