@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(start(r#""https://github.com/x/y""#), Start::Probe { candidate: "https://github.com/x/y".into() });
         assert_eq!(start("git@github.com:x/y.git"), Start::Probe { candidate: "https://github.com/x/y.git".into() });
         for (url, says) in [
-            ("https://t@github.com/x/y", "remove them"),
+            ("https://t@github.com/x/y", "remove it"),
             ("git://github.com/x/y", "git://"),
             ("/srv/x", "local path"),
             ("user@host:~u/x", "no https"),
