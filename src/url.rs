@@ -279,9 +279,11 @@ pub fn download_shareability(url: &str) -> Shareability {
 /// `auth`, `key`, `sig`, `signature`, `token`, `password`, `pass`, `pwd` or `secret`; containing
 /// `token`, `secret`, `passw`, `credential`, `signature`, `apikey`, `api_key`, `api-key`,
 /// `access_key`, `accesskey` or `session`; or starting with `x-amz-`, `x-goog-` or `x-ms-`
-/// (presigned cloud-storage URLs). A denylist, so an ordinary download link's query passes.
+/// (presigned cloud-storage URLs). A denylist, so an ordinary download link's query passes. The key
+/// is percent-decoded first, as often as it still changes (up to three times): `p%61ssword` and
+/// `p%2561ssword` are `password`.
 pub fn is_credential_key(key: &str) -> bool {
-    let k = key.trim().to_ascii_lowercase();
+    let k = percent_decoded(key).trim().to_ascii_lowercase();
     const EXACT: [&str; 9] = ["auth", "key", "sig", "signature", "token", "password", "pass", "pwd", "secret"];
     const WITHIN: [&str; 11] = [
         "token", "secret", "passw", "credential", "signature", "apikey", "api_key", "api-key", "access_key", "accesskey",
@@ -289,6 +291,36 @@ pub fn is_credential_key(key: &str) -> bool {
     ];
     const PREFIX: [&str; 3] = ["x-amz-", "x-goog-", "x-ms-"];
     EXACT.contains(&k.as_str()) || WITHIN.iter().any(|w| k.contains(w)) || PREFIX.iter().any(|p| k.starts_with(p))
+}
+
+/// `s` with `%XX` escapes decoded, repeatedly while that changes it (at most three times), and any
+/// invalid UTF-8 replaced. A `%` not followed by two hex digits stays as written.
+fn percent_decoded(s: &str) -> String {
+    let mut cur = s.to_owned();
+    for _ in 0..3 {
+        let b = cur.as_bytes();
+        let mut out = Vec::with_capacity(b.len());
+        let mut i = 0;
+        while i < b.len() {
+            let hex = |c: u8| (c as char).to_digit(16);
+            match (b[i], b.get(i + 1).copied().and_then(hex), b.get(i + 2).copied().and_then(hex)) {
+                (b'%', Some(h), Some(l)) => {
+                    out.push((h * 16 + l) as u8);
+                    i += 3;
+                }
+                (c, _, _) => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        let next = String::from_utf8_lossy(&out).into_owned();
+        if next == cur {
+            break;
+        }
+        cur = next;
+    }
+    cur
 }
 
 /// Whether the query or fragment of `tail` (a URL from its host on) has a credential-like key.
@@ -361,10 +393,16 @@ impl Shareability {
                 "{shown} is a local path, which nobody else can download; put the file where others can \
                  reach it and use that URL"
             ),
-            Shareability::Ssh { .. } | Shareability::Unsupported => format!(
-                "{shown} is not a URL others can download from (ssh needs an account on the host); use \
-                 an https URL"
-            ),
+            Shareability::Ssh { .. } | Shareability::Unsupported => match download_scheme(url).as_deref() {
+                Some(s) if s.contains("ssh") || is_ssh(url) => format!(
+                    "{shown} is not a URL others can download from (ssh needs an account on the host); \
+                     use an https URL"
+                ),
+                Some(s @ ("svn" | "git")) => format!(
+                    "{shown} uses {s}://, which can't be checked for anonymous access; use an https URL"
+                ),
+                _ => format!("{shown} is not a URL others can download from; use an https URL"),
+            },
         })
     }
 }
@@ -400,6 +438,15 @@ fn credentials_refusal(url: &str, download: bool) -> String {
     format!("{} carries {what}, which must never be published; remove it from the URL", Redacted(url))
 }
 
+/// A download URL's scheme, lowercased (`svn`, `svn+ssh`), when it has one; `None` for an
+/// scp-like address or a path.
+fn download_scheme(url: &str) -> Option<String> {
+    let u = unquote(url);
+    let (scheme, _) = u.split_once("://")?;
+    (!scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b)))
+        .then(|| scheme.to_ascii_lowercase())
+}
+
 /// The refusal for a remote whose probe never asked anything: its host resolves to an address that
 /// isn't public ([`crate::probe::is_public_address`]). `host` is the host as written.
 pub fn private_address_refusal(url: &str, host: &str) -> String {
@@ -408,6 +455,22 @@ pub fn private_address_refusal(url: &str, host: &str) -> String {
          it; publish a URL on a public host",
         Redacted(url)
     )
+}
+
+/// The refusal for a git remote `url` whose https URL `https` (`url` itself, or an ssh URL's
+/// [`https_equivalent`]) answered the anonymous probe with a status saying it is busy or failing
+/// ([`crate::probe::is_busy`]: 408, 429, 5xx). Nothing is known about the repo: try again later.
+pub fn busy_refusal(url: &str, https: &str, status: u16) -> String {
+    if is_ssh(url) {
+        format!(
+            "{} is an ssh URL, and its https equivalent {} can't be checked right now (it answered \
+             {status}); try again later",
+            Redacted(url),
+            Redacted(https)
+        )
+    } else {
+        format!("{} can't be checked right now (it answered {status}); try again later", Redacted(url))
+    }
 }
 
 /// The refusal for a remote whose host couldn't be reached at all (no such host, refused, timed
@@ -1161,5 +1224,24 @@ mod tests {
         }
         assert!(private_address_refusal("https://10.0.0.5/x", "10.0.0.5").contains("10.0.0.5 is not a public address"));
         assert!(unreachable_refusal("https://t@h/x", "connection refused").starts_with("https://***@h/x can't be checked"));
+    }
+
+    #[test]
+    fn encoded_keys_and_svn() {
+        use Shareability::*;
+        assert_eq!(download_shareability("https://host/x?p%61ssword=s3cret"), Credentials);
+        assert_eq!(download_shareability("https://host/x?p%2561ssword=s3cret"), Credentials);
+        assert_eq!(download_shareability("https://host/x?X%2DAmz%2DSignature=s3cret"), Credentials);
+        assert_eq!(download_shareability("https://host/x?dl%3D1"), Shareable);
+        assert_eq!(download_shareability("https://host/x?a=%ZZ"), Shareable);
+        let m = download_shareability("https://host/x?p%61ssword=s3cret").download_refusal("https://host/x?p%61ssword=s3cret").unwrap();
+        assert!(m.contains("`p%61ssword` in its query") && !m.contains("s3cret"), "{m}");
+        let svn = "svn://svn.example.org/repo/trunk";
+        let m = download_shareability(svn).download_refusal(svn).unwrap();
+        assert!(m.contains("uses svn://, which can't be checked") && !m.contains("ssh"), "{m}");
+        let m = Unsupported.download_refusal("svn+ssh://svn.example.org/repo").unwrap();
+        assert!(m.contains("ssh needs an account"), "{m}");
+        let m = Unsupported.download_refusal("s3://bucket/x").unwrap();
+        assert!(m.contains("not a URL others can download from; use an https URL"), "{m}");
     }
 }
