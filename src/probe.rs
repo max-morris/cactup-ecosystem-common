@@ -12,16 +12,15 @@
 //!    `User-Agent` starting with [`USER_AGENT_PREFIX`] (`git/`), since forges answer git clients
 //!    and browsers differently. Follow no redirect. Connect only to an address
 //!    [`is_public_address`] accepts, and to the address you checked (resolve once, then pin it).
-//! 2. Turn the response into an [`Outcome`]: [`is_answer`] on the status and `Content-Type` gives
-//!    [`Outcome::Answer`]; a 3xx gives [`Outcome::Redirect`] with
-//!    [`redirect_target`]`(request, Location)`; anything else (an error, a 401 or 403, no
-//!    connection) is [`Outcome::Other`].
+//! 2. Turn the response into an [`Outcome`] with [`outcome`]`(request, status, Content-Type,
+//!    Location)`. When there was no response at all, or the address was refused, report it with
+//!    [`crate::url::unreachable_refusal`] or [`crate::url::private_address_refusal`] instead.
 //! 3. [`next_step`] says what to do: publish the candidate, ask once more at the target of a
 //!    redirect to the same repo (GitLab's `.git` form), or refuse with a message to show.
 //!
 //! Every probe connects only to addresses [`is_public_address`] accepts, http as well as https.
 
-use crate::url::{Shareability, moved_refusal, redirect_is_same_repo, shareability, unanswered_refusal, unquote};
+use crate::url::{Shareability, busy_refusal, moved_refusal, redirect_is_same_repo, shareability, unanswered_refusal, unquote};
 use std::net::IpAddr;
 
 /// What the probe asks for after the repo URL: git's smart-HTTP ref advertisement, the first thing
@@ -79,8 +78,13 @@ pub fn redirect_target(request_url: &str, location: &str) -> Option<String> {
 /// Whether the probe may connect to `ip`: only globally routable addresses. Refused: private,
 /// loopback, link-local, unspecified, broadcast, multicast and documentation ranges; 0/8,
 /// 100.64/10 (shared), 192.0.0/24, 198.18/15 (benchmarking), 240/4; IPv6 unique-local, link-local,
-/// NAT64 (64:ff9b::/96 and /48), documentation, and v4-mapped or v4-compatible forms of a refused
-/// IPv4 address.
+/// site-local (fec0::/10, deprecated), documentation, Teredo (2001::/32), the local-use NAT64
+/// prefix 64:ff9b:1::/48 (where the IPv4 address sits depends on the operator's prefix length, so
+/// it can't be judged), and v4-mapped or v4-compatible forms of a refused IPv4 address.
+///
+/// An address that embeds an IPv4 address at a fixed place is judged by that address: the
+/// well-known NAT64 prefix 64:ff9b::/96 (what DNS64 synthesizes for an IPv4-only host such as
+/// github.com, in its last 32 bits) and 6to4 2002::/16 (in bits 16 to 48).
 pub fn is_public_address(ip: IpAddr) -> bool {
     !private(ip)
 }
@@ -109,11 +113,42 @@ fn private(ip: IpAddr) -> bool {
                 || v.is_multicast()
                 || (s[0] & 0xfe00) == 0xfc00
                 || (s[0] & 0xffc0) == 0xfe80
-                || s[0] == 0x0064 && s[1] == 0xff9b
+                || (s[0] & 0xffc0) == 0xfec0
                 || s[0] == 0x2001 && s[1] == 0x0db8
+                || s[0] == 0x2001 && s[1] == 0x0000
+                || s[0] == 0x0064 && s[1] == 0xff9b && s[2] == 0x0001
+                || s[0] == 0x0064 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0] && private(IpAddr::V4(v4(s[6], s[7])))
+                || s[0] == 0x0064 && s[1] == 0xff9b && s[2] != 0x0001 && s[2..6] != [0, 0, 0, 0]
+                || s[0] == 0x2002 && private(IpAddr::V4(v4(s[1], s[2])))
                 || v.to_ipv4_mapped().is_some_and(|m| private(IpAddr::V4(m)))
                 || v.to_ipv4().is_some_and(|m| private(IpAddr::V4(m)))
         }
+    }
+}
+
+/// The IPv4 address in two 16-bit segments.
+fn v4(hi: u16, lo: u16) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8)
+}
+
+/// Whether a status means the host is busy or failing rather than refusing a stranger: 408, 429
+/// or any 5xx. Nothing is learned about the repo; ask again later.
+pub fn is_busy(status: u16) -> bool {
+    status == 408 || status == 429 || (500..=599).contains(&status)
+}
+
+/// The [`Outcome`] of an HTTP response to `request_url` (a [`probe_url`]): [`is_answer`] →
+/// [`Outcome::Answer`]; a 3xx → [`Outcome::Redirect`] with [`redirect_target`] of `location`;
+/// [`is_busy`] → [`Outcome::Busy`]; anything else → [`Outcome::Other`].
+pub fn outcome(request_url: &str, status: u16, content_type: Option<&str>, location: Option<&str>) -> Outcome {
+    if is_answer(status, content_type) {
+        Outcome::Answer
+    } else if (300..=399).contains(&status) {
+        Outcome::Redirect(location.and_then(|l| redirect_target(request_url, l)))
+    } else if is_busy(status) {
+        Outcome::Busy(status)
+    } else {
+        Outcome::Other
     }
 }
 
@@ -124,8 +159,11 @@ pub enum Outcome {
     Answer,
     /// A 3xx, with [`redirect_target`] of its `Location` when it had one.
     Redirect(Option<String>),
-    /// Anything else: an error status (401, 403, 404, …), a 200 that isn't the advertisement, a
-    /// refused address, no connection.
+    /// A status saying the host is busy or failing ([`is_busy`]: 408, 429, 5xx), with it.
+    Busy(u16),
+    /// Anything else the host answered: an error status (401, 403, 404, …), a 200 that isn't the
+    /// advertisement. (No answer at all, or a refused address, is the caller's to report:
+    /// [`crate::url::unreachable_refusal`], [`crate::url::private_address_refusal`].)
     Other,
 }
 
@@ -169,6 +207,7 @@ pub enum Step {
 /// - On the first probe, a redirect to the same repo ([`redirect_is_same_repo`]) is asked once more.
 /// - Any other redirect is refused by [`moved_refusal`] (a real move says so; a sign-in page or
 ///   another host is [`unanswered_refusal`]).
+/// - A busy or failing host ([`Outcome::Busy`]) is [`busy_refusal`]: try again later.
 /// - Anything else is [`unanswered_refusal`].
 pub fn next_step(url: &str, candidate: &str, asked: &str, outcome: &Outcome) -> Step {
     let first = asked == candidate;
@@ -176,6 +215,7 @@ pub fn next_step(url: &str, candidate: &str, asked: &str, outcome: &Outcome) -> 
         Outcome::Answer => Step::Publish(candidate.to_owned()),
         Outcome::Redirect(Some(to)) if first && redirect_is_same_repo(candidate, to) => Step::Probe(to.clone()),
         Outcome::Redirect(to) => Step::Refuse(moved_refusal(url, candidate, to.as_deref())),
+        Outcome::Busy(status) => Step::Refuse(busy_refusal(url, candidate, *status)),
         Outcome::Other => Step::Refuse(unanswered_refusal(url, candidate)),
     }
 }
@@ -273,5 +313,45 @@ mod tests {
         // http:// redirecting to its https form is the same repo, asked once more.
         let http = "http://github.com/x/y";
         assert_eq!(next_step(http, http, http, &Outcome::Redirect(Some("https://github.com/x/y".into()))), Step::Probe("https://github.com/x/y".into()));
+    }
+
+    #[test]
+    fn embedded_addresses() {
+        let public = |a: &str| is_public_address(a.parse().unwrap());
+        // DNS64's synthesized address for an IPv4-only host is judged by that host.
+        assert!(public("64:ff9b::8c52:7004"), "github.com behind NAT64");
+        assert!(!public("64:ff9b::a00:1"), "10.0.0.1 behind NAT64");
+        assert!(!public("64:ff9b::7f00:1"), "127.0.0.1 behind NAT64");
+        assert!(!public("64:ff9b:1::8c52:7004"), "local-use NAT64: can't be judged");
+        assert!(!public("64:ff9b:5::8c52:7004"), "elsewhere in 64:ff9b::/32");
+        // 6to4.
+        assert!(public("2002:8c52:7004::1"));
+        assert!(!public("2002:c0a8:101::1"), "192.168.1.1 in 6to4");
+        assert!(!public("fec0::1"), "site-local");
+        assert!(!public("2001:0:4136:e378::1"), "Teredo");
+        assert!(public("2001:4860:4860::8888"));
+    }
+
+    #[test]
+    fn busy_hosts() {
+        let req = "https://bitbucket.org/o/r/info/refs?service=git-upload-pack";
+        assert_eq!(outcome(req, 429, None, None), Outcome::Busy(429));
+        assert_eq!(outcome(req, 503, Some("text/html"), None), Outcome::Busy(503));
+        assert_eq!(outcome(req, 401, None, None), Outcome::Other);
+        assert_eq!(outcome(req, 200, Some(ADVERTISEMENT), None), Outcome::Answer);
+        assert_eq!(
+            outcome(req, 301, None, Some("/o/s/info/refs?service=git-upload-pack")),
+            Outcome::Redirect(Some("https://bitbucket.org/o/s".into()))
+        );
+        let url = "https://bitbucket.org/o/r";
+        match next_step(url, url, url, &Outcome::Busy(429)) {
+            Step::Refuse(m) => assert!(m.contains("429") && m.contains("try again later") && !m.contains("private"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        let ssh = "git@bitbucket.org:o/r";
+        match next_step(ssh, url, url, &Outcome::Busy(502)) {
+            Step::Refuse(m) => assert!(m.contains("ssh URL") && m.contains("502") && m.contains("try again later"), "{m}"),
+            other => panic!("{other:?}"),
+        }
     }
 }
