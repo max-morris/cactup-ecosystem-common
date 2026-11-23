@@ -421,17 +421,22 @@ fn credentials_refusal(url: &str, download: bool) -> String {
             _ => {}
         }
         let tail = &u[p.after_userinfo..];
-        if let Some(at) = tail.find(['?', '#']) {
-            let keys: Vec<&str> = tail[at + 1..]
-                .split(['&', ';', '?', '#'])
+        // The query (from `?` to any `#`) and the fragment (after `#`), each named as such.
+        let (query, fragment) = match tail.find('#') {
+            Some(h) => (tail[..h].split_once('?').map(|(_, q)| q), Some(&tail[h + 1..])),
+            None => (tail.split_once('?').map(|(_, q)| q), None),
+        };
+        let first_key = |part: &str| {
+            part.split(['&', ';', '?', '#'])
                 .map(|pair| pair.split_once('=').map_or(pair, |(k, _)| k))
-                .filter(|k| is_credential_key(k))
-                .collect();
-            match keys.first() {
-                Some(k) => found.push(format!("`{k}` in its query")),
-                None if !download && tail[at..].starts_with('?') => found.push("a query string".into()),
-                None => {}
-            }
+                .find(|k| is_credential_key(k))
+                .map(str::to_owned)
+        };
+        match (query.and_then(first_key), fragment.and_then(first_key)) {
+            (Some(k), _) => found.push(format!("`{k}` in its query")),
+            (None, Some(k)) => found.push(format!("`{k}` in its fragment")),
+            (None, None) if !download && query.is_some() => found.push("a query string".into()),
+            (None, None) => {}
         }
     }
     let what = if found.is_empty() { "credentials".to_owned() } else { found.join(" and ") };
@@ -568,9 +573,11 @@ pub fn redirect_is_move(https: &str, to: &str) -> bool {
 }
 
 /// A URL for messages and logs, with anything that may be a credential replaced by `***`: the
-/// userinfo of any URL but an ssh one, an ssh URL's password (its user name stays), and a query
-/// string (`?***`). Everything else is shown as written. `https://alice:TOKEN@host/x?t=1` displays
-/// as `https://***@host/x?***`; `git:pw@host:x` as `git:***@host:x`.
+/// userinfo of any URL but an ssh one, an ssh URL's password (its user name stays), a query string
+/// (`?***`, the fragment after it included) and a fragment (`#***`, which may carry a token:
+/// `#access_token=…`). Everything else is shown as written. `https://alice:TOKEN@host/x?t=1`
+/// displays as `https://***@host/x?***`; `https://h/f.tgz#token=X` as `https://h/f.tgz#***`;
+/// `git:pw@host:x` as `git:***@host:x`.
 #[derive(Debug, Clone, Copy)]
 pub struct Redacted<'a>(pub &'a str);
 
@@ -589,7 +596,7 @@ impl std::fmt::Display for Redacted<'_> {
 /// [`Redacted`]'s work on an unquoted URL. A URL [`Parts`] takes apart cleanly keeps an ssh user
 /// name; anything else (a local or `file://` URL, a remote helper's address, a port that isn't a
 /// number, nothing parseable) loses everything up to its last `@`, when it has a scheme or the
-/// `@` comes before any `/`. A query string always becomes `?***`.
+/// `@` comes before any `/`. A query string always becomes `?***`, a fragment `#***`.
 fn redact(f: &mut std::fmt::Formatter<'_>, url: &str) -> std::fmt::Result {
     if is_helper(url)
         && let Some((transport, address)) = url.split_once("::")
@@ -623,8 +630,9 @@ fn redact(f: &mut std::fmt::Formatter<'_>, url: &str) -> std::fmt::Result {
             }
         }
     };
-    match tail.find('?') {
-        Some(q) => write!(f, "{}?***", &tail[..q]),
+    // A query hides everything after it, a fragment included; a fragment alone becomes `#***`.
+    match tail.find(['?', '#']) {
+        Some(at) => write!(f, "{}{}***", &tail[..at], &tail[at..at + 1]),
         None => f.write_str(tail),
     }
 }
@@ -1243,5 +1251,24 @@ mod tests {
         assert!(m.contains("ssh needs an account"), "{m}");
         let m = Unsupported.download_refusal("s3://bucket/x").unwrap();
         assert!(m.contains("not a URL others can download from; use an https URL"), "{m}");
+    }
+
+    #[test]
+    fn fragments_hidden() {
+        for (url, shown) in [
+            ("https://h/f.tar.gz#token=s3cret", "https://h/f.tar.gz#***"),
+            ("https://h/f.tar.gz?dl=1#token=s3cret", "https://h/f.tar.gz?***"),
+            ("https://u:s3cret@h/x#frag", "https://***@h/x#***"),
+            ("git@github.com:o/x#s3cret", "git@github.com:o/x#***"),
+            ("foo://u:s3cret@h/x#s3cret", "foo://***@h/x#***"),
+            ("https://h/x", "https://h/x"),
+        ] {
+            assert_eq!(Redacted(url).to_string(), shown, "{url}");
+        }
+        let u = "https://h/f.tar.gz#access_token=s3cret";
+        let m = download_shareability(u).download_refusal(u).unwrap();
+        assert!(m.contains("`access_token` in its fragment") && !m.contains("s3cret"), "{m}");
+        let u = "https://h/f.tgz?token=a#sig=b";
+        assert!(download_shareability(u).download_refusal(u).unwrap().contains("`token` in its query"));
     }
 }
