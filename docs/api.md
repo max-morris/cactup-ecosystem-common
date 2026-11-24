@@ -228,7 +228,9 @@ does: preview first (`dry-run`), then confirm what the preview showed (`expect`)
 
 - `tag`: the tag to start from, instead of each entry's newest own tag.
 - `owner`: the namespace (an organization of the user's); else the user's own.
-- `only`: register just the entries of these names; the others are `skipped`.
+- `only`: register just the entries of these names; the others are `skipped`. A name of an entry
+  already on the repo is answered `existing` (with no `expect` when every name is one); a name that
+  is no entry there, or one the preview leaves out, is a 400 saying which.
 - `dry-run`: say what registering would do, writing nothing. The answer carries `expect`.
 - `expect`: the fingerprint a dry run returned. Registering with it registers exactly what the
   preview showed, or nothing: when the repo or the entries already on it changed since, the
