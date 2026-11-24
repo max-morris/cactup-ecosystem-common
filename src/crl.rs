@@ -339,7 +339,10 @@ pub fn splice_includes(text: &str, base: Option<&Path>) -> Res<String> {
         };
         let target = caps[1].trim();
         if is_url(target) {
-            bail!("!INCLUDE of URL '{target}' is not yet supported; only local-path includes are");
+            bail!(
+                "!INCLUDE of URL '{}' is not yet supported; only local-path includes are",
+                crate::url::Redacted(target)
+            );
         }
         let base_dir = base
             .ok_or_else(|| anyhow!("!INCLUDE '{target}' has no base directory to resolve against"))?;
@@ -646,7 +649,7 @@ fn build_section(
     let Some(checkout_val) = map.get("CHECKOUT") else {
         warnings.push(format!(
             "Nothing will be checked out from {} (target {target})",
-            map.get("URL").cloned().unwrap_or_default()
+            crate::url::Redacted(map.get("URL").map(String::as_str).unwrap_or_default())
         ));
         return Ok(());
     };
@@ -819,8 +822,9 @@ fn detect_duplicates(components: &[Component], section_of: &[usize], root: &str)
 /// sections can differ only by branch), else its `!TARGET`.
 fn source_desc(c: &Component) -> String {
     match (&c.url, &c.branch) {
-        (Some(url), Some(branch)) => format!("{url}, branch {branch}"),
-        (Some(url), None) => url.clone(),
+        // Redacted: this goes into parse errors, which a registry stores and shows.
+        (Some(url), Some(branch)) => format!("{}, branch {branch}", crate::url::Redacted(url)),
+        (Some(url), None) => crate::url::Redacted(url).to_string(),
         (None, _) => format!("target {}", c.target),
     }
 }
@@ -1882,5 +1886,27 @@ Numerical/PrivateThorn
             ]
         );
         assert!(t.ignored().iter().all(|c| c.ty == ComponentType::Ignore));
+    }
+
+    /// What the parser says about a list quotes no credential: a registry stores its errors.
+    #[test]
+    fn errors_redact_urls() {
+        let src = "\
+!CRL_VERSION = 1.0
+
+!TARGET = repos
+!TYPE = git
+!URL = https://s3cret@github.com/org/A.git
+!CHECKOUT = A/X
+
+!TARGET = repos
+!TYPE = git
+!URL = https://github.com/org/B.git?private_token=s3cret
+!CHECKOUT = A/X
+";
+        let e = format!("{:#}", parse(src).unwrap_err());
+        assert!(e.contains("A/X") && e.contains("https://***@github.com/org/A.git") && !e.contains("s3cret"), "{e}");
+        let e = format!("{:#}", parse("!CRL_VERSION = 1.0\n!INCLUDE = https://u:s3cret@host/x.th\n").unwrap_err());
+        assert!(!e.contains("s3cret"), "{e}");
     }
 }
