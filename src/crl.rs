@@ -54,6 +54,10 @@ pub struct Thornlist {
     /// `repos/`, so no repo, and no source state, could be found for them —
     /// plus [`UNTRACKED_FLESH`] when the root `Makefile` is not one either.
     untracked: Vec<String>,
+    /// The `!TYPE = ignore` sections' components (rule 13), one per `!CHECKOUT` token, in list
+    /// order: parsed and validated like the rest, but never fetched, so kept out of
+    /// [`Thornlist::components`]. Empty for a plain `ThornList`.
+    ignored: Vec<Component>,
     /// Set only by [`parse_config_list`]'s plain-`ThornList` path. Not
     /// derived from an empty `crl_version`: a bare `!CRL_VERSION` header
     /// parses with one too.
@@ -61,7 +65,8 @@ pub struct Thornlist {
 }
 
 /// The `!TYPE` a component is fetched with. `Ignore` components are parsed
-/// and validated but dropped from [`Thornlist::components`] (rule 13), and
+/// and validated but kept out of [`Thornlist::components`] (rule 13; they are
+/// in [`Thornlist::ignored`]), and
 /// take no part in duplicate-checkout detection (see
 /// [`detect_duplicates`]). The one exception is a list resolved from a plain
 /// `ThornList` by [`parse_config_list`], which marks a thorn with no repo
@@ -200,10 +205,8 @@ pub fn parse_with_base(src: &str, include_base: Option<&Path>) -> Res<Thornlist>
     // 14. Duplicate-checkout detection, lexical only, no filesystem access.
     detect_duplicates(&all_components, &section_of, &root)?;
 
-    let components: Vec<Component> = all_components
-        .into_iter()
-        .filter(|c| c.ty != ComponentType::Ignore)
-        .collect();
+    let (ignored, components): (Vec<Component>, Vec<Component>) =
+        all_components.into_iter().partition(|c| c.ty == ComponentType::Ignore);
 
     Ok(Thornlist {
         components,
@@ -212,6 +215,7 @@ pub fn parse_with_base(src: &str, include_base: Option<&Path>) -> Res<Thornlist>
         crl_version,
         root,
         untracked: Vec::new(),
+        ignored,
         plain: false,
     })
 }
@@ -231,6 +235,7 @@ impl Thornlist {
             crl_version: String::new(),
             root,
             untracked,
+            ignored: Vec::new(),
             plain: true,
         }
     }
@@ -241,6 +246,15 @@ impl Thornlist {
 
     pub fn disabled_thorns(&self) -> &[String] {
         &self.disabled_thorns
+    }
+
+    /// The `!TYPE = ignore` sections, one component per `!CHECKOUT` token, in list order: never
+    /// fetched, so not in [`Thornlist::components`]. Each has `ty` [`ComponentType::Ignore`], its
+    /// `target`, `checkout`, `name`, `repo` (from `!NAME`, else the checkout token itself), and
+    /// `url` when the section has a `!URL` (`$1`/`$2` substituted per checkout), so a caller can
+    /// name what a list ignores (a shared `.sim` must not). Empty for a plain `ThornList`.
+    pub fn ignored(&self) -> &[Component] {
+        &self.ignored
     }
 
     /// See the field: thorns of a plain `ThornList` with no repo behind them.
@@ -325,7 +339,10 @@ pub fn splice_includes(text: &str, base: Option<&Path>) -> Res<String> {
         };
         let target = caps[1].trim();
         if is_url(target) {
-            bail!("!INCLUDE of URL '{target}' is not yet supported; only local-path includes are");
+            bail!(
+                "!INCLUDE of URL '{}' is not yet supported; only local-path includes are",
+                crate::url::Redacted(target)
+            );
         }
         let base_dir = base
             .ok_or_else(|| anyhow!("!INCLUDE '{target}' has no base directory to resolve against"))?;
@@ -612,7 +629,8 @@ fn build_section(
                     target: target.clone(),
                     checkout: token.to_owned(),
                     name,
-                    url: None,
+                    // Informational ([`Thornlist::ignored`]): an ignore section is never fetched.
+                    url: map.get("URL").map(|u| subst_12(u, &dir1, &dir2)),
                     auth_url: None,
                     anon_user: map.get("ANON_USER").cloned(),
                     anon_pass: map.get("ANON_PASS").cloned(),
@@ -631,7 +649,7 @@ fn build_section(
     let Some(checkout_val) = map.get("CHECKOUT") else {
         warnings.push(format!(
             "Nothing will be checked out from {} (target {target})",
-            map.get("URL").cloned().unwrap_or_default()
+            crate::url::Redacted(map.get("URL").map(String::as_str).unwrap_or_default())
         ));
         return Ok(());
     };
@@ -804,8 +822,9 @@ fn detect_duplicates(components: &[Component], section_of: &[usize], root: &str)
 /// sections can differ only by branch), else its `!TARGET`.
 fn source_desc(c: &Component) -> String {
     match (&c.url, &c.branch) {
-        (Some(url), Some(branch)) => format!("{url}, branch {branch}"),
-        (Some(url), None) => url.clone(),
+        // Redacted: this goes into parse errors, which a registry stores and shows.
+        (Some(url), Some(branch)) => format!("{}, branch {branch}", crate::url::Redacted(url)),
+        (Some(url), None) => crate::url::Redacted(url).to_string(),
         (None, _) => format!("target {}", c.target),
     }
 }
@@ -1832,4 +1851,62 @@ Numerical/PrivateThorn
         assert_eq!(commit("B"), Some("0123456789abcdef0123456789abcdef01234567".to_string()));
     }
 
+
+    #[test]
+    fn ignored_sections_are_listed() {
+        let src = "\
+!CRL_VERSION = 1.0
+
+!TARGET = repos
+!TYPE = git
+!URL = https://github.com/org/Kept.git
+!CHECKOUT = Kept/A
+
+!TARGET = repos
+!TYPE = ignore
+!URL = https://github.com/org/$1.git
+!CHECKOUT = Private/B Private/C
+
+!TARGET = repos
+!TYPE = ignore
+!NAME = scratch
+!CHECKOUT = Mine/D
+";
+        let t = ok(src);
+        let kept: Vec<&str> = t.components().iter().map(|c| c.checkout.as_str()).collect();
+        assert_eq!(kept, vec!["Kept/A"], "components() is unchanged");
+        let ignored: Vec<(&str, &str, Option<&str>)> =
+            t.ignored().iter().map(|c| (c.checkout.as_str(), c.repo.as_str(), c.url.as_deref())).collect();
+        assert_eq!(
+            ignored,
+            vec![
+                ("Private/B", "Private/B", Some("https://github.com/org/Private.git")),
+                ("Private/C", "Private/C", Some("https://github.com/org/Private.git")),
+                ("Mine/D", "scratch", None),
+            ]
+        );
+        assert!(t.ignored().iter().all(|c| c.ty == ComponentType::Ignore));
+    }
+
+    /// What the parser says about a list quotes no credential: a registry stores its errors.
+    #[test]
+    fn errors_redact_urls() {
+        let src = "\
+!CRL_VERSION = 1.0
+
+!TARGET = repos
+!TYPE = git
+!URL = https://s3cret@github.com/org/A.git
+!CHECKOUT = A/X
+
+!TARGET = repos
+!TYPE = git
+!URL = https://github.com/org/B.git?private_token=s3cret
+!CHECKOUT = A/X
+";
+        let e = format!("{:#}", parse(src).unwrap_err());
+        assert!(e.contains("A/X") && e.contains("https://***@github.com/org/A.git") && !e.contains("s3cret"), "{e}");
+        let e = format!("{:#}", parse("!CRL_VERSION = 1.0\n!INCLUDE = https://u:s3cret@host/x.th\n").unwrap_err());
+        assert!(!e.contains("s3cret"), "{e}");
+    }
 }
