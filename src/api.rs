@@ -442,6 +442,17 @@ pub struct DownloadInfo {
     /// The review of this URL with this content ([`DownloadSubmission`]): `pending`, `approved`
     /// or `rejected`; `None` when it was never submitted.
     pub review: Option<String>,
+    /// Where the server's check of the download stands, when it was submitted: `fetching` (being
+    /// fetched and hashed), `ok` (it was, and matched), `failed` (see `reason`) or `vouched` (an
+    /// admin approved it without a fetch). A download that failed stays `pending` in `review`
+    /// until it is submitted again (which retries the fetch) or an admin decides. Absent from an
+    /// older server's answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+    /// Why the check failed (`failed` only), in words to show: "the file's sha256 is …, not …",
+    /// "the server answered 404 Not Found", "it is more than the … bytes the Cactarium reads".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// `GET /providers`: the thorns of published packages that meet one CCL requirement. Exactly one
