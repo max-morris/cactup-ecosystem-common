@@ -18,6 +18,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -225,9 +226,16 @@ impl ThornFacts {
     /// The tree may be untrusted: symlinks are never followed, hidden directories are skipped,
     /// and at most [`MAX_SOURCE_FILES`] files of at most [`MAX_SOURCE_BYTES`] each are read.
     pub fn scan_sources(&mut self, thorn_dir: &Path) {
+        self.scan_sources_until(thorn_dir, &AtomicBool::new(false));
+    }
+
+    /// [`ThornFacts::scan_sources`], stopping before the next directory or file once `stop` is
+    /// set (a caller's Ctrl-C flag). Returns whether the scan finished; a stopped scan leaves
+    /// [`ThornFacts::needs_includes`] empty, never a partial answer that looks complete.
+    pub fn scan_sources_until(&mut self, thorn_dir: &Path, stop: &AtomicBool) -> bool {
         self.needs_includes.clear();
         if self.uses_includes.is_empty() {
-            return;
+            return true;
         }
         let mut found: Vec<String> = Vec::new();
         // Macros the sources test (`#ifdef X`, `defined(X)`), normalized.
@@ -235,10 +243,16 @@ impl ThornFacts {
         let mut budget = MAX_SOURCE_FILES;
         let mut stack = vec![thorn_dir.join("src")];
         while let Some(dir) = stack.pop() {
+            if stop.load(Ordering::Relaxed) {
+                return false;
+            }
             let Ok(rd) = std::fs::read_dir(&dir) else { continue };
             let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
             entries.sort_by_key(|e| e.file_name());
             for e in entries {
+                if stop.load(Ordering::Relaxed) {
+                    return false;
+                }
                 let name = e.file_name().to_string_lossy().into_owned();
                 let Ok(ty) = e.file_type() else { continue };
                 if name.starts_with('.') || ty.is_symlink() {
@@ -269,6 +283,7 @@ impl ThornFacts {
             .filter(|u| found.contains(u) && is_include_name(u) && !tested.contains(&guard_key(u)))
             .cloned()
             .collect();
+        true
     }
 }
 
@@ -854,6 +869,22 @@ PROVIDES CarpetX
         f.scan_sources(&root);
         assert_eq!(f.needs_includes, ["TP_Guts.h"]);
         assert_eq!(needs_of(&f), [Need::Include("TP_Guts.h".into())]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A scan whose stop flag is set reads nothing and says so, leaving no needs behind (not even
+    /// an earlier scan's); one whose flag stays clear is the plain scan.
+    #[test]
+    fn a_stopped_source_scan_says_so_and_leaves_no_needs() {
+        let root = std::env::temp_dir().join(format!("ccl-sources-stop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.cc"), "#include \"TP_Guts.h\"\n").unwrap();
+        let mut f = ThornFacts::scan("IMPLEMENTS: X\nUSES INCLUDE: TP_Guts.h\n", None);
+        assert!(f.scan_sources_until(&root, &AtomicBool::new(false)));
+        assert_eq!(f.needs_includes, ["TP_Guts.h"]);
+        assert!(!f.scan_sources_until(&root, &AtomicBool::new(true)));
+        assert!(f.needs_includes.is_empty());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
