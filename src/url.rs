@@ -480,9 +480,10 @@ pub fn busy_refusal(url: &str, https: &str, status: u16) -> String {
 
 /// The refusal for a remote whose host couldn't be reached at all (no such host, refused, timed
 /// out, no route): nothing was asked, so nothing is known about the repo. `detail` says what
-/// happened; it is shown as given, so keep URLs out of it or redact them.
+/// happened; it is shown as given, so keep URLs out of it or redact them. It doesn't say to try
+/// again later: for an ssh remote whose https equivalent no one can connect to, waiting won't help.
 pub fn unreachable_refusal(url: &str, detail: &str) -> String {
-    format!("{} can't be checked: its host couldn't be reached ({detail}); try again later", Redacted(url))
+    format!("{} can't be checked: its host couldn't be reached ({detail})", Redacted(url))
 }
 
 /// The refusal for a git remote `url` whose https URL `https` (`url` itself, or an ssh URL's
@@ -1231,7 +1232,10 @@ mod tests {
             assert!(!m.contains("s3cret") && m.ends_with("remove it from the URL"), "{m}");
         }
         assert!(private_address_refusal("https://10.0.0.5/x", "10.0.0.5").contains("10.0.0.5 is not a public address"));
-        assert!(unreachable_refusal("https://t@h/x", "connection refused").starts_with("https://***@h/x can't be checked"));
+        assert_eq!(
+            unreachable_refusal("https://t@h/x", "connection refused"),
+            "https://***@h/x can't be checked: its host couldn't be reached (connection refused)"
+        );
     }
 
     #[test]
