@@ -118,7 +118,11 @@ left out of a request (and its answer) that asks about none.
     "fork-of": ["et/carpet@=2026.5.1"],
     "commit-known": true
   }],
-  "downloads": [{ "url": "https://example.org/id.tar.gz", "sha256": "…", "review": null }]
+  "downloads": [
+    { "url": "https://example.org/id.tar.gz", "sha256": "…", "review": null },
+    { "url": "https://example.org/bh.h5", "sha256": "…", "review": "pending", "verification": "failed",
+      "reason": "the file's sha256 is 3f9a…, not 0b12…" }
+  ]
 }
 ```
 
@@ -138,6 +142,14 @@ left out of a request (and its answer) that asks about none.
 - `review`: `pending` when `version` awaits review; absent otherwise.
 - A download's `review`: `pending`, `approved` or `rejected`, or `null` when it was never
   submitted (`POST /downloads`).
+- A download's `verification`, when it was submitted: where the server's check of it stands.
+  `fetching` (being fetched and hashed), `ok` (it was, and the sha256 matched), `failed` (see
+  `reason`) or `vouched` (an admin approved it without a fetch). A download whose check failed
+  stays `pending` in `review` until it is submitted again, which retries the fetch, or an admin
+  decides; so a client keys off `verification`, not `review`, to say it couldn't be verified.
+  Absent when never submitted, and from a server before this field.
+- A download's `reason`, only with `failed`: why, in words to show ("the file's sha256 is …, not
+  …", "the server answered 404 Not Found"). Absent otherwise.
 
 Pins and downloads are separate lists, rather than one list of either, so each entry has one
 unambiguous shape.
